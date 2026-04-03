@@ -22,6 +22,32 @@ defmodule Mobus.Stepwise.UI.WizardConfig do
     embeds_many(:steps, WizardStep)
   end
 
+  @doc """
+  Returns a changeset for validating and casting wizard configuration attributes.
+
+  Casts `:title`, `:state`, `:step_display`, and `:current_step` fields. Requires
+  `:workflow`. Embeds `:steps` using `WizardStep.changeset/2`, requiring at least
+  one step.
+
+  ## Parameters
+
+    * `wizard_config` — a `%WizardConfig{}` struct
+    * `attrs` — map of attributes to cast
+
+  ## Returns
+
+    * An `Ecto.Changeset` for the wizard config.
+
+  ## Examples
+
+      WizardConfig.changeset(%WizardConfig{}, %{
+        workflow: "onboarding",
+        title: "Setup Wizard",
+        steps: [%{title: "Step 1"}, %{title: "Step 2"}]
+      })
+
+  """
+  @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(wizard_config, attrs) do
     wizard_config
     |> cast(attrs, [:title, :state, :step_display, :current_step])

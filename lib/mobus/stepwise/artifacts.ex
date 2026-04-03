@@ -12,6 +12,32 @@ defmodule Mobus.Stepwise.Artifacts do
 
   @type artifact_map :: %{optional(String.t()) => artifact_entry()}
 
+  @doc """
+  Normalizes an artifact map into canonical format.
+
+  Each artifact entry is coerced to include `"kind"`, `"version"`, `"inserted_at"`,
+  and `"data"` keys with string keys throughout. Keys are stringified, and entries
+  without explicit metadata default to kind `"opaque"` and version `1`.
+
+  Returns an empty map for `nil` or non-map inputs.
+
+  ## Parameters
+
+    * `artifacts` — a map of artifact entries, or `nil`
+
+  ## Returns
+
+    * A normalized `artifact_map()` with string keys and canonical entry structure.
+
+  ## Examples
+
+      Artifacts.normalize(%{report: %{kind: "pdf", data: "..."}})
+      #=> %{"report" => %{"kind" => "pdf", "version" => 1, "inserted_at" => "...", "data" => "..."}}
+
+      Artifacts.normalize(nil)
+      #=> %{}
+
+  """
   @spec normalize(map() | nil) :: artifact_map()
   def normalize(nil), do: %{}
 
@@ -32,6 +58,26 @@ defmodule Mobus.Stepwise.Artifacts do
 
   def normalize(_), do: %{}
 
+  @doc """
+  Merges two artifact maps, with incoming entries overriding existing ones.
+
+  Both maps are normalized before merging. `nil` inputs are treated as empty maps.
+
+  ## Parameters
+
+    * `existing` — the current artifact map (or `nil`)
+    * `incoming` — new artifacts to merge in (or `nil`)
+
+  ## Returns
+
+    * A merged and normalized `artifact_map()`.
+
+  ## Examples
+
+      Artifacts.merge(%{"a" => %{"data" => 1}}, %{"b" => %{"data" => 2}})
+      #=> %{"a" => %{...}, "b" => %{...}}
+
+  """
   @spec merge(map() | nil, map() | nil) :: artifact_map()
   def merge(existing, incoming) do
     existing = normalize(existing)

@@ -7,6 +7,29 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
 
   alias Mobus.Stepwise.Projection
 
+  @doc """
+  Builds the canonical `Mobus.Stepwise.Projection` from the current runtime.
+
+  This is an ALF pipeline stage. Computes the projection struct containing
+  all information needed for UI rendering: current state, available events,
+  UI descriptor, artifacts, blocked reasons, subscriptions, errors, and trace.
+
+  Available events are derived from the step's position in the ordered step list:
+  - First step: `[:next]`
+  - Last step: `[:back]`
+  - Middle steps: `[:back, :next]`
+
+  ## Parameters
+
+    * `event` — pipeline event map with `:spec` and `:runtime`
+    * `opts` — ALF stage options (unused)
+
+  ## Returns
+
+    * Updated event map with `%Mobus.Stepwise.Projection{}` in both
+      `event.runtime.projection` and `event.projection`.
+
+  """
   @spec call(map(), map()) :: map()
   def call(%{spec: spec, runtime: runtime} = event, _opts) do
     current = Map.get(runtime, :current_state)

@@ -7,6 +7,23 @@ defmodule Mobus.Stepwise.Components.StepwiseContextMerge do
   in-band runtime context, enabling resume and later step actions.
   """
 
+  @doc """
+  Merges the event payload into `runtime.context`.
+
+  This is an ALF pipeline stage. It shallow-merges `event.payload` into
+  `runtime.context`, accumulating user input across successive events.
+  Skipped when the event has an error status.
+
+  ## Parameters
+
+    * `event` — pipeline event map with `:runtime` and `:payload` keys
+    * `opts` — ALF stage options (unused)
+
+  ## Returns
+
+    * Updated event map with merged context in `event.runtime.context`.
+
+  """
   @spec call(map(), map()) :: map()
   def call(%{status: :error} = event, _opts), do: event
 

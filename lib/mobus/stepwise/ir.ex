@@ -8,6 +8,30 @@ defmodule Mobus.Stepwise.IR do
 
   @type t :: map()
 
+  @doc """
+  Normalizes a raw workflow spec into the internal representation (IR).
+
+  Applies the following normalizations:
+  - Coerces `"stepwise"` string profile to `:stepwise` atom
+  - Extracts `:initial_state` from atom or string keys
+  - Ensures `:states` and `:transitions` are maps (converts keyword lists)
+
+  This reduces downstream conditionals in engine and pipeline components.
+
+  ## Parameters
+
+    * `spec` — a raw workflow specification map
+
+  ## Returns
+
+    * A normalized spec map (IR) with consistent atom keys.
+
+  ## Examples
+
+      IR.normalize(%{"profile" => "stepwise", "initial_state" => :step_one, "states" => %{}})
+      #=> %{profile: :stepwise, initial_state: :step_one, states: %{}, transitions: %{}, ...}
+
+  """
   @spec normalize(map()) :: t()
   def normalize(%{} = spec) do
     spec
