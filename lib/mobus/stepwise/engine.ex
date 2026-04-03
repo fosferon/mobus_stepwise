@@ -47,6 +47,35 @@ defmodule Mobus.Stepwise.Engine do
           optional(:projection) => Projection.t()
         }
 
+  @doc """
+  Initializes a new stepwise workflow runtime from a spec and runtime context.
+
+  Normalizes the spec into internal representation (IR), starts the ALF pipeline
+  (if not already running), builds the initial runtime map, fires entry actions
+  for the initial state, and computes the first projection.
+
+  ## Parameters
+
+    * `spec` — workflow specification map containing `:profile`, `:initial_state`,
+      `:steps`, `:states`, and optionally `:transitions`, `:breakpoints`, `:subscriptions`
+    * `runtime_context` — context map requiring `:tenant_id` and optionally
+      `:execution_id`, `:sync`, and `:initial_context`
+
+  ## Returns
+
+    * `{:ok, runtime}` — runtime map with computed projection
+    * `{:error, reason}` — if tenant_id is missing or pipeline fails to start
+
+  ## Examples
+
+      spec = %{profile: :stepwise, initial_state: :step_one, steps: [:step_one, :step_two],
+               states: %{step_one: %{step_number: 1, ui: %{key: :step_one}},
+                         step_two: %{step_number: 2, ui: %{key: :step_two}}}}
+
+      {:ok, runtime} = Engine.init(spec, %{tenant_id: "t1", execution_id: "e1", sync: true})
+
+  """
+  @spec init(map(), map()) :: {:ok, runtime()} | {:error, term()}
   @impl true
   def init(spec, runtime_context) when is_map(spec) and is_map(runtime_context) do
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
@@ -74,6 +103,37 @@ defmodule Mobus.Stepwise.Engine do
     end
   end
 
+  @doc """
+  Processes an event against the current runtime, advancing the workflow.
+
+  Sends the event through the ALF pipeline which, in order:
+  1. Merges the payload into `runtime.context`
+  2. Executes any step action (capability) defined for the current state
+  3. Advances or reverses `current_state` based on the event
+  4. Fires entry actions if the state changed
+  5. Records breakpoint hits
+  6. Computes the updated projection
+
+  ## Parameters
+
+    * `runtime` — current runtime map (as returned by `init/2` or a prior `handle_event/3`)
+    * `event` — event atom or string (`:next`, `:back`, `"next"`, `"back"`, or custom)
+    * `payload` — map of user input to merge into context
+
+  ## Returns
+
+    * `{:ok, runtime}` — successful state transition with updated projection
+    * `{:wait, runtime, wait_cfg}` — transition requires async resolution
+    * `{:error, reason, runtime}` — action or pipeline failure
+
+  ## Examples
+
+      {:ok, runtime} = Engine.handle_event(runtime, :next, %{name: "Alice"})
+      {:ok, runtime} = Engine.handle_event(runtime, :back, %{})
+
+  """
+  @spec handle_event(runtime(), atom() | String.t(), map()) ::
+          {:ok, runtime()} | {:wait, runtime(), map()} | {:error, term(), runtime()}
   @impl true
   def handle_event(runtime, event, payload)
       when is_map(runtime) and (is_atom(event) or is_binary(event)) and is_map(payload) do
@@ -102,6 +162,29 @@ defmodule Mobus.Stepwise.Engine do
     end
   end
 
+  @doc """
+  Returns the current `Mobus.Stepwise.Projection` for the runtime.
+
+  If the runtime already contains a computed projection, returns it directly.
+  Otherwise, recomputes the projection by running the pipeline in
+  projection-only mode (no state transition).
+
+  ## Parameters
+
+    * `runtime` — current runtime map
+
+  ## Returns
+
+    * `%Mobus.Stepwise.Projection{}` — the canonical UI projection struct
+
+  ## Examples
+
+      projection = Engine.get_state(runtime)
+      projection.current_state  #=> :step_two
+      projection.available_events  #=> [:back, :next]
+
+  """
+  @spec get_state(runtime()) :: Projection.t() | map()
   @impl true
   def get_state(%{projection: %Projection{} = projection}), do: projection
 
@@ -114,6 +197,27 @@ defmodule Mobus.Stepwise.Engine do
     end
   end
 
+  @doc """
+  Extracts a serializable checkpoint from the runtime for persistence.
+
+  Strips the projection (non-serializable) and retains only the core runtime
+  fields needed to resume the workflow later via `restore/3`.
+
+  ## Parameters
+
+    * `runtime` — current runtime map
+
+  ## Returns
+
+    * A plain map suitable for JSON serialization or database storage.
+
+  ## Examples
+
+      checkpoint = Engine.checkpoint(runtime)
+      # => %{execution_id: "e1", current_state: :step_two, context: %{name: "Alice"}, ...}
+
+  """
+  @spec checkpoint(runtime()) :: map()
   @impl true
   def checkpoint(runtime) when is_map(runtime) do
     runtime
@@ -132,6 +236,31 @@ defmodule Mobus.Stepwise.Engine do
     ])
   end
 
+  @doc """
+  Restores a runtime from a previously saved checkpoint.
+
+  Re-normalizes the spec into IR, reconstitutes the runtime from checkpoint
+  data, starts the pipeline if needed, and recomputes the projection. The
+  restored runtime is fully functional for subsequent `handle_event/3` calls.
+
+  ## Parameters
+
+    * `spec` — the original workflow specification map
+    * `checkpoint` — map previously returned by `checkpoint/1`
+    * `runtime_context` — context map requiring `:tenant_id` and optionally `:sync`
+
+  ## Returns
+
+    * `{:ok, runtime}` — restored runtime with recomputed projection
+    * `{:error, reason}` — if tenant_id is missing or pipeline fails to start
+
+  ## Examples
+
+      checkpoint = Engine.checkpoint(runtime)
+      {:ok, restored} = Engine.restore(spec, checkpoint, %{tenant_id: "t1", sync: true})
+
+  """
+  @spec restore(map(), map(), map()) :: {:ok, runtime()} | {:error, term()}
   @impl true
   def restore(spec, checkpoint, runtime_context)
       when is_map(spec) and is_map(checkpoint) and is_map(runtime_context) do

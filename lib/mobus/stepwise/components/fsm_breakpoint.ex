@@ -5,6 +5,29 @@ defmodule Mobus.Stepwise.Components.FsmBreakpoint do
   Records breakpoint hits for debugging and inspection purposes.
   """
 
+  @doc """
+  Records breakpoint hits for debugging and inspection.
+
+  This is an ALF pipeline stage. Checks the spec's `:breakpoints` list against
+  the current event and state. Matching breakpoints are appended to
+  `runtime.breakpoint_hits` with a timestamp, and a trace entry is recorded.
+
+  Supports breakpoint types:
+  - `on: :event` — matches when the breakpoint value equals the event name
+  - `on: :state_enter` — matches when the breakpoint value equals the current state
+
+  Skipped when the event has an error status.
+
+  ## Parameters
+
+    * `event` — pipeline event map with `:spec`, `:runtime`, `:event`
+    * `opts` — ALF stage options (unused)
+
+  ## Returns
+
+    * Updated event map with breakpoint hits and trace entries in runtime.
+
+  """
   @spec call(map(), map()) :: map()
   def call(%{status: :error} = event, _opts), do: event
 

@@ -17,6 +17,28 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
   alias Mobus.Stepwise.Artifacts
   alias Mobus.Stepwise.Capabilities
 
+  @doc """
+  Executes the declarative action defined for the current step, if any.
+
+  This is an ALF pipeline stage. Looks up the current state's `:action` definition
+  in `spec.states`, and if a `:capability` action is defined whose trigger matches
+  the current event, executes it via `Mobus.Stepwise.Capabilities`. On success,
+  merges context updates and artifacts into the runtime. On failure, sets error
+  status and populates `blocked_reasons`.
+
+  Skipped when the event has an error status or the event payload is not a map.
+
+  ## Parameters
+
+    * `event` — pipeline event map with `:spec`, `:runtime`, `:event`, `:payload`
+    * `opts` — ALF stage options (unused)
+
+  ## Returns
+
+    * Updated event map, potentially with modified runtime context, artifacts,
+      trace entries, or error status.
+
+  """
   @spec call(map(), map()) :: map()
   def call(%{status: :error} = event, _opts), do: event
 
@@ -29,6 +51,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
     do: Map.put(event, :status, :error) |> Map.put(:error, :invalid_action_shape)
 
   @doc false
+  @spec run_entry_action(map()) :: map()
   def run_entry_action(%{spec: spec, runtime: runtime} = event) do
     do_execute_action(event, spec, runtime, :__enter__, %{})
   end

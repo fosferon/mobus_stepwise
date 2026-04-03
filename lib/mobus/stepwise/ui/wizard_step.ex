@@ -22,6 +22,27 @@ defmodule Mobus.Stepwise.UI.WizardStep do
     field(:component, :string)
   end
 
+  @doc """
+  Returns a changeset for validating and casting wizard step attributes.
+
+  Casts `:title`, `:description`, `:state`, and `:component` fields from the
+  given attributes map. Requires `:title` and `:state`.
+
+  ## Parameters
+
+    * `wizard_step` — a `%WizardStep{}` struct (or `%WizardStep{}` from `Ecto.Changeset`)
+    * `attrs` — map of attributes to cast
+
+  ## Returns
+
+    * An `Ecto.Changeset` for the wizard step.
+
+  ## Examples
+
+      WizardStep.changeset(%WizardStep{}, %{title: "Personal Info", component: "personal_form"})
+
+  """
+  @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(wizard_step, attrs) do
     wizard_step
     |> cast(attrs, [:title, :description, :state, :component])

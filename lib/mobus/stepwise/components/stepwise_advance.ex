@@ -11,6 +11,27 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   - `:back` / `"back"`
   """
 
+  @doc """
+  Advances or reverses the current step based on the event.
+
+  This is an ALF pipeline stage. For `:next`/`"next"` events, moves to the next
+  step in order. For `:back`/`"back"`, moves to the previous step. For custom
+  events, looks up explicit transitions in `spec.transitions`. Updates history
+  and trace on successful transitions.
+
+  Skipped when `skip_transition: true` is set (projection-only mode) or on error status.
+
+  ## Parameters
+
+    * `event` — pipeline event map with `:spec`, `:runtime`, `:event`, `:payload`
+    * `opts` — ALF stage options (unused)
+
+  ## Returns
+
+    * Updated event map with `:runtime` (potentially new `current_state`),
+      `:previous_state`, and `:state_changed?` flag.
+
+  """
   @spec call(map(), map()) :: map()
   def call(%{skip_transition: true} = event, _opts), do: event
   def call(%{status: :error} = event, _opts), do: event
