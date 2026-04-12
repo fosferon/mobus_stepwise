@@ -93,7 +93,9 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
           |> Map.update(:artifacts, %{}, fn artifacts ->
             Artifacts.merge(artifacts, artifacts_from(out))
           end)
-          |> Map.update(:trace, [], fn trace -> trace ++ [%{kind: :action, handle: handle}] end)
+          |> Map.update(:trace, [], fn trace ->
+            trace ++ [%{kind: :action, handle: handle, step_id: Map.get(runtime, :current_state)}]
+          end)
           |> maybe_put_action_result(out)
 
         %{event | runtime: runtime}
@@ -101,7 +103,9 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
       {:ok, other} ->
         runtime =
           runtime
-          |> Map.update(:trace, [], fn trace -> trace ++ [%{kind: :action, handle: handle}] end)
+          |> Map.update(:trace, [], fn trace ->
+            trace ++ [%{kind: :action, handle: handle, step_id: Map.get(runtime, :current_state)}]
+          end)
 
         %{event | runtime: runtime} |> Map.put(:action_result, other)
 
