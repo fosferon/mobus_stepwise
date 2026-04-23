@@ -35,6 +35,10 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   @spec call(map(), map()) :: map()
   def call(%{skip_transition: true} = event, _opts), do: event
   def call(%{status: :error} = event, _opts), do: event
+  # Capability yielded wait — do not advance. The step that returned wait
+  # stays current until `Engine.restore/3` + another `handle_event/3` moves
+  # the runtime forward on resume.
+  def call(%{wait: wait} = event, _opts) when not is_nil(wait), do: event
 
   def call(%{spec: spec, runtime: runtime, event: event_name, payload: payload} = event, _opts)
       when is_map(payload) do

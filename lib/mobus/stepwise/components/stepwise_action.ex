@@ -109,6 +109,37 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
 
         %{event | runtime: runtime} |> Map.put(:action_result, other)
 
+      # Capability yields a pause. The pipeline stamps `:wait` onto the event
+      # so downstream stages (StepwiseAdvance, StepwiseEntryAction) short-circuit
+      # and the engine's `handle_event/3` extractor sees `%{wait: cfg}` and
+      # returns `{:wait, runtime, cfg}` to the caller. Optional `:context`
+      # merges (so a wait step can still publish a `result` that becomes its
+      # step output on resume).
+      {:wait, wait_return} ->
+        {context_updates, wait_cfg} = extract_wait(wait_return)
+
+        runtime =
+          runtime
+          |> merge_context(context_updates)
+          |> Map.update(:artifacts, %{}, fn artifacts ->
+            Artifacts.merge(artifacts, artifacts_from(wait_return))
+          end)
+          |> Map.update(:trace, [], fn trace ->
+            trace ++
+              [
+                %{
+                  kind: :action,
+                  handle: handle,
+                  step_id: Map.get(runtime, :current_state),
+                  status: :wait
+                }
+              ]
+          end)
+
+        event
+        |> Map.put(:runtime, runtime)
+        |> Map.put(:wait, wait_cfg)
+
       {:error, reason} ->
         runtime =
           runtime
@@ -233,4 +264,24 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
   defp artifacts_from(%{artifacts: %{} = artifacts}), do: artifacts
   defp artifacts_from(%{"artifacts" => %{} = artifacts}), do: artifacts
   defp artifacts_from(_), do: %{}
+
+  # Normalize the value accompanying `{:wait, ...}`. Capabilities may return:
+  #   * `{:wait, wait_cfg}`          — bare wait config, no context merge
+  #   * `{:wait, %{context: ctx, wait: cfg}}` — both at once
+  #   * `{:wait, %{wait: cfg}}`      — explicit wait key, no context
+  # Always returns `{context_updates_map, wait_cfg}` where wait_cfg may be a
+  # map/keyword/binary describing the pause reason — the engine passes it
+  # through opaquely to the caller.
+  defp extract_wait(%{} = m) do
+    context = Map.get(m, :context) || Map.get(m, "context") || %{}
+
+    wait =
+      Map.get(m, :wait) ||
+        Map.get(m, "wait") ||
+        Map.drop(m, [:context, "context", :artifacts, "artifacts"])
+
+    {context, wait}
+  end
+
+  defp extract_wait(other), do: {%{}, other}
 end

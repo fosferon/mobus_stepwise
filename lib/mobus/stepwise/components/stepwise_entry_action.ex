@@ -29,9 +29,15 @@ defmodule Mobus.Stepwise.Components.StepwiseEntryAction do
   @spec call(map(), map()) :: map()
   def call(%{status: :error} = event, _opts), do: event
   def call(%{skip_transition: true} = event, _opts), do: event
+  # Upstream capability already yielded wait — don't run another entry action
+  # on top of the pending pause.
+  def call(%{wait: wait} = event, _opts) when not is_nil(wait), do: event
 
   def call(%{state_changed?: true} = event, _opts) do
-    StepwiseAction.run_entry_action(event)
+    case StepwiseAction.run_entry_action(event) do
+      %{wait: wait} = out when not is_nil(wait) -> out
+      other -> other
+    end
   end
 
   def call(event, _opts), do: event
