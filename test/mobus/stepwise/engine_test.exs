@@ -1,5 +1,7 @@
 defmodule Mobus.Stepwise.EngineTest do
-  use ExUnit.Case, async: true
+  # async: false — tests in "init/2 initial entry action errors" mutate the
+  # shared :mobus_stepwise, :capability_runner_adapter application env.
+  use ExUnit.Case, async: false
 
   alias Mobus.Stepwise.Engine
   alias Mobus.Stepwise.Projection
@@ -104,5 +106,59 @@ defmodule Mobus.Stepwise.EngineTest do
       assert {:ok, restored} = Engine.handle_event(restored, :next, %{})
       assert restored.current_state == :step_three
     end
+  end
+
+  describe "init/2 initial entry action errors" do
+    setup do
+      previous = Application.get_env(:mobus_stepwise, :capability_runner_adapter)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:mobus_stepwise, :capability_runner_adapter)
+          mod -> Application.put_env(:mobus_stepwise, :capability_runner_adapter, mod)
+        end
+      end)
+
+      :ok
+    end
+
+    test "propagates {:error, reason} from the initial state's entry capability" do
+      Application.put_env(
+        :mobus_stepwise,
+        :capability_runner_adapter,
+        __MODULE__.BoomOnEnterAdapter
+      )
+
+      spec = %{
+        profile: :stepwise,
+        initial_state: :step_one,
+        steps: [:step_one, :step_two],
+        states: %{
+          step_one: %{
+            step_number: 1,
+            ui: %{key: :step_one},
+            action: %{type: :capability, handle: "test.boom", triggers: [:enter]}
+          },
+          step_two: %{step_number: 2, ui: %{key: :step_two}}
+        }
+      }
+
+      assert {:error, {:initial_entry_action_failed, :boom, runtime}} =
+               Engine.init(spec, @runtime_context)
+
+      # Capability-populated blocked_reasons survives the merge so the caller can
+      # inspect which state/event produced the error.
+      assert is_map(runtime)
+      assert runtime.current_state == :step_one
+      assert runtime.blocked_reasons != %{}
+      assert runtime.blocked_reasons |> Map.values() |> Enum.member?(:boom)
+    end
+  end
+
+  # Capability adapter that always returns {:error, :boom}. Used to verify that
+  # a failing entry capability on the initial state surfaces as an error from
+  # Engine.init/2 rather than being silently swallowed.
+  defmodule BoomOnEnterAdapter do
+    def execute(_tenant_id, _handle, _input), do: {:error, :boom}
   end
 end

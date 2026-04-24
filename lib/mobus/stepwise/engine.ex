@@ -54,6 +54,13 @@ defmodule Mobus.Stepwise.Engine do
   (if not already running), builds the initial runtime map, fires entry actions
   for the initial state, and computes the first projection.
 
+  If the initial state defines a capability action whose trigger matches `:enter`,
+  that action runs during `init/2`. When that action returns `{:error, reason}`,
+  the error is propagated to the caller as
+  `{:error, {:initial_entry_action_failed, reason, runtime}}` with `blocked_reasons`
+  populated on the returned runtime. Previously such errors were silently discarded,
+  causing workflows whose first step errored to advance as if the step had succeeded.
+
   ## Parameters
 
     * `spec` — workflow specification map containing `:profile`, `:initial_state`,
@@ -65,6 +72,8 @@ defmodule Mobus.Stepwise.Engine do
 
     * `{:ok, runtime}` — runtime map with computed projection
     * `{:error, reason}` — if tenant_id is missing or pipeline fails to start
+    * `{:error, {:initial_entry_action_failed, reason, runtime}}` — if the initial
+      state's entry capability returned `{:error, reason}`
 
   ## Examples
 
@@ -75,7 +84,9 @@ defmodule Mobus.Stepwise.Engine do
       {:ok, runtime} = Engine.init(spec, %{tenant_id: "t1", execution_id: "e1", sync: true})
 
   """
-  @spec init(map(), map()) :: {:ok, runtime()} | {:error, term()}
+  @spec init(map(), map()) ::
+          {:ok, runtime()}
+          | {:error, {:initial_entry_action_failed, term(), runtime()} | term()}
   @impl true
   def init(spec, runtime_context) when is_map(spec) and is_map(runtime_context) do
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
@@ -96,10 +107,15 @@ defmodule Mobus.Stepwise.Engine do
         breakpoint_hits: []
       }
 
-      # Fire entry action for the initial state so capabilities with :enter trigger run
-      runtime = run_initial_entry_action(runtime)
+      # Fire entry action for the initial state so capabilities with :enter trigger run.
+      # Errors from the entry capability propagate to the caller rather than being swallowed.
+      case run_initial_entry_action(runtime) do
+        {:ok, runtime} ->
+          {:ok, compute_projection(runtime)}
 
-      {:ok, runtime |> compute_projection()}
+        {:error, reason, failed_runtime} ->
+          {:error, {:initial_entry_action_failed, reason, compute_projection(failed_runtime)}}
+      end
     end
   end
 
@@ -408,12 +424,25 @@ defmodule Mobus.Stepwise.Engine do
       state_changed?: true
     }
 
+    # `:blocked_reasons` is merged back in both branches so success-then-wait paths
+    # (e.g. the capability sets a reason but succeeds) surface it to the caller, and
+    # so the error branch carries the capability-populated reason.
     case StepwiseAction.run_entry_action(event) do
+      %{status: :error, error: reason, runtime: updated_runtime} ->
+        {:error, reason, merge_entry_runtime(runtime, updated_runtime)}
+
       %{runtime: updated_runtime} ->
-        Map.merge(runtime, Map.take(updated_runtime, [:context, :artifacts, :trace]))
+        {:ok, merge_entry_runtime(runtime, updated_runtime)}
 
       _ ->
-        runtime
+        {:ok, runtime}
     end
+  end
+
+  defp merge_entry_runtime(runtime, updated_runtime) do
+    Map.merge(
+      runtime,
+      Map.take(updated_runtime, [:context, :artifacts, :trace, :blocked_reasons])
+    )
   end
 end
