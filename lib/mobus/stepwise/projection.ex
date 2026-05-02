@@ -20,7 +20,8 @@ defmodule Mobus.Stepwise.Projection do
     artifacts: %{},
     ui: nil,
     errors: [],
-    trace: []
+    trace: [],
+    extensions: %{}
   ]
 
   @type ui_descriptor :: %{
@@ -39,6 +40,7 @@ defmodule Mobus.Stepwise.Projection do
           artifacts: map(),
           ui: ui_descriptor() | nil,
           errors: [map()],
-          trace: list()
+          trace: list(),
+          extensions: map()
         }
 end

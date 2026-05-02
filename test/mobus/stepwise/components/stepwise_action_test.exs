@@ -1,7 +1,6 @@
 defmodule Mobus.Stepwise.Components.StepwiseActionTest do
   use ExUnit.Case, async: false
 
-  alias Mobus.Stepwise.Components.StepwiseAction
   alias Mobus.Stepwise.Engine
 
   @spec_with_actions %{

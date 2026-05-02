@@ -32,7 +32,8 @@ defmodule MobusStepwise.MixProject do
     [
       {:alf, "~> 0.12"},
       {:ecto, "~> 3.11"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:telemetry, "~> 0.4 or ~> 1.0"}
     ]
   end
 

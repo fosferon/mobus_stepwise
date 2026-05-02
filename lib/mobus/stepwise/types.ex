@@ -15,6 +15,8 @@ defmodule Mobus.Stepwise.Types do
   @type runtime_context :: map()
   @type runtime :: map()
 
+  @type meta :: map()
+
   @type event :: atom() | String.t()
   @type payload :: map()
 

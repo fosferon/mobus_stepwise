@@ -80,6 +80,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
       payload: payload,
       current_state: Map.get(runtime, :current_state),
       context: Map.get(runtime, :context, %{}),
+      meta: Map.get(runtime, :meta, %{}),
       artifacts: Map.get(runtime, :artifacts, %{}) || %{},
       execution_id: Map.get(runtime, :execution_id),
       action_config: action_config || %{}

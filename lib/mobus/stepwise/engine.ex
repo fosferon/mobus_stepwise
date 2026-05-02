@@ -31,6 +31,7 @@ defmodule Mobus.Stepwise.Engine do
   alias Mobus.Stepwise.Pipeline.Stepwise, as: StepwisePipeline
   alias Mobus.Stepwise.Components.StepwiseProjection
   alias Mobus.Stepwise.Projection
+  alias Mobus.Stepwise.Telemetry
   require Logger
 
   @type runtime :: %{
@@ -43,6 +44,7 @@ defmodule Mobus.Stepwise.Engine do
           optional(:trace) => list(),
           optional(:blocked_reasons) => map(),
           optional(:breakpoint_hits) => list(),
+          optional(:meta) => map(),
           optional(:errors) => [map()],
           optional(:projection) => Projection.t()
         }
@@ -89,6 +91,40 @@ defmodule Mobus.Stepwise.Engine do
           | {:error, {:initial_entry_action_failed, term(), runtime()} | term()}
   @impl true
   def init(spec, runtime_context) when is_map(spec) and is_map(runtime_context) do
+    telemetry_meta = %{
+      tenant_id: Map.get(runtime_context, :tenant_id) || Map.get(runtime_context, "tenant_id"),
+      execution_id:
+        Map.get(runtime_context, :execution_id) || Map.get(runtime_context, "execution_id")
+    }
+
+    Telemetry.span([:mobus_stepwise, :engine, :init], telemetry_meta, fn ->
+      result = do_init(spec, runtime_context)
+
+      stop_meta =
+        case result do
+          {:ok, rt} ->
+            Map.merge(telemetry_meta, %{
+              status: :ok,
+              current_state: rt.current_state,
+              meta: Map.get(rt, :meta, %{})
+            })
+
+          {:error, {:initial_entry_action_failed, _, rt}} ->
+            Map.merge(telemetry_meta, %{
+              status: :error,
+              current_state: Map.get(rt, :current_state),
+              meta: Map.get(rt, :meta, %{})
+            })
+
+          {:error, reason} ->
+            Map.merge(telemetry_meta, %{status: :error, reason: reason})
+        end
+
+      {result, stop_meta}
+    end)
+  end
+
+  defp do_init(spec, runtime_context) do
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
          {:ok, execution_id} <- fetch_execution_id(runtime_context),
          :ok <- ensure_pipeline(runtime_context),
@@ -104,11 +140,10 @@ defmodule Mobus.Stepwise.Engine do
         history: [],
         trace: [],
         blocked_reasons: %{},
-        breakpoint_hits: []
+        breakpoint_hits: [],
+        meta: Map.get(runtime_context, :meta, %{}) || %{}
       }
 
-      # Fire entry action for the initial state so capabilities with :enter trigger run.
-      # Errors from the entry capability propagate to the caller rather than being swallowed.
       case run_initial_entry_action(runtime) do
         {:ok, runtime} ->
           {:ok, compute_projection(runtime)}
@@ -153,6 +188,28 @@ defmodule Mobus.Stepwise.Engine do
   @impl true
   def handle_event(runtime, event, payload)
       when is_map(runtime) and (is_atom(event) or is_binary(event)) and is_map(payload) do
+    telemetry_meta = Telemetry.runtime_metadata(runtime) |> Map.put(:event, event)
+
+    Telemetry.span([:mobus_stepwise, :engine, :handle_event], telemetry_meta, fn ->
+      result = do_handle_event(runtime, event, payload)
+
+      stop_meta =
+        case result do
+          {:ok, rt} ->
+            Map.merge(telemetry_meta, %{status: :ok, current_state: rt.current_state})
+
+          {:wait, rt, _cfg} ->
+            Map.merge(telemetry_meta, %{status: :wait, current_state: rt.current_state})
+
+          {:error, reason, _rt} ->
+            Map.merge(telemetry_meta, %{status: :error, reason: reason})
+        end
+
+      {result, stop_meta}
+    end)
+  end
+
+  defp do_handle_event(runtime, event, payload) do
     :ok = ensure_pipeline(%{})
 
     input = %{
@@ -248,7 +305,8 @@ defmodule Mobus.Stepwise.Engine do
       :history,
       :trace,
       :blocked_reasons,
-      :breakpoint_hits
+      :breakpoint_hits,
+      :meta
     ])
   end
 
@@ -280,6 +338,33 @@ defmodule Mobus.Stepwise.Engine do
   @impl true
   def restore(spec, checkpoint, runtime_context)
       when is_map(spec) and is_map(checkpoint) and is_map(runtime_context) do
+    telemetry_meta = %{
+      tenant_id: Map.get(runtime_context, :tenant_id) || Map.get(runtime_context, "tenant_id"),
+      execution_id:
+        Map.get(checkpoint, :execution_id) || Map.get(checkpoint, "execution_id")
+    }
+
+    Telemetry.span([:mobus_stepwise, :engine, :restore], telemetry_meta, fn ->
+      result = do_restore(spec, checkpoint, runtime_context)
+
+      stop_meta =
+        case result do
+          {:ok, rt} ->
+            Map.merge(telemetry_meta, %{
+              status: :ok,
+              current_state: rt.current_state,
+              meta: Map.get(rt, :meta, %{})
+            })
+
+          {:error, reason} ->
+            Map.merge(telemetry_meta, %{status: :error, reason: reason})
+        end
+
+      {result, stop_meta}
+    end)
+  end
+
+  defp do_restore(spec, checkpoint, runtime_context) do
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
          :ok <- ensure_pipeline(runtime_context) do
       ir = IR.normalize(spec)
@@ -290,6 +375,9 @@ defmodule Mobus.Stepwise.Engine do
           Map.get(runtime_context, :execution_id) ||
           Map.get(runtime_context, "execution_id") ||
           "stem-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+      checkpoint_meta = Map.get(checkpoint, :meta) || Map.get(checkpoint, "meta") || %{}
+      context_meta = Map.get(runtime_context, :meta) || %{}
 
       runtime = %{
         execution_id: execution_id,
@@ -304,7 +392,8 @@ defmodule Mobus.Stepwise.Engine do
         blocked_reasons:
           Map.get(checkpoint, :blocked_reasons) || Map.get(checkpoint, "blocked_reasons") || %{},
         breakpoint_hits:
-          Map.get(checkpoint, :breakpoint_hits) || Map.get(checkpoint, "breakpoint_hits") || []
+          Map.get(checkpoint, :breakpoint_hits) || Map.get(checkpoint, "breakpoint_hits") || [],
+        meta: Map.merge(checkpoint_meta, context_meta)
       }
 
       {:ok, compute_projection(runtime)}
