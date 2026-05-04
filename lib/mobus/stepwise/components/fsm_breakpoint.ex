@@ -3,6 +3,11 @@ defmodule Mobus.Stepwise.Components.FsmBreakpoint do
   Breakpoint component for stepwise workflows.
 
   Records breakpoint hits for debugging and inspection purposes.
+
+  > **Naming note**: Despite the `FsmBreakpoint` module name, this component
+  > operates exclusively within stepwise pipelines. The name is historical
+  > (predating the profile extraction) and is retained to avoid breaking
+  > internal pipeline references.
   """
 
   alias Mobus.Stepwise.SpecHelpers

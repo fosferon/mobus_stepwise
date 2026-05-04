@@ -6,8 +6,8 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
   """
 
   alias Mobus.Stepwise.Projection
+  alias Mobus.Stepwise.ProjectionHelpers
   alias Mobus.Stepwise.SpecHelpers
-  require Logger
 
   @doc """
   Builds the canonical `Mobus.Stepwise.Projection` from the current runtime.
@@ -44,12 +44,12 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
       available_events: available_events(ordered, current),
       blocked_reasons: Map.get(runtime, :blocked_reasons, %{}),
       breakpoint_hits: Map.get(runtime, :breakpoint_hits, []),
-      subscriptions: subscriptions_for(spec, runtime),
+      subscriptions: ProjectionHelpers.subscriptions_for(spec, runtime),
       artifacts: Map.get(runtime, :artifacts, %{}),
-      ui: ui_for(spec, current, runtime),
+      ui: ProjectionHelpers.ui_for(spec, current, runtime),
       errors: Map.get(runtime, :errors, []),
       trace: Map.get(runtime, :trace, []),
-      extensions: build_extensions(spec, runtime)
+      extensions: ProjectionHelpers.build_extensions(spec, runtime)
     }
 
     runtime = Map.put(runtime, :projection, projection)
@@ -78,106 +78,4 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
   end
 
   defp available_events(_ordered, _current), do: []
-
-  defp ui_for(spec, current, runtime) do
-    states = Map.get(spec, :states) || %{}
-    state_def = Map.get(states, current) || Map.get(states, to_string(current)) || %{}
-
-    ui =
-      Map.get(state_def, :ui) ||
-        Map.get(state_def, "ui") ||
-        %{}
-
-    key =
-      Map.get(ui, :key) || Map.get(ui, "key") || Map.get(state_def, :ui_key) ||
-        Map.get(state_def, "ui_key")
-
-    assigns =
-      Map.get(ui, :assigns) ||
-        Map.get(ui, "assigns") ||
-        %{}
-
-    context_assigns = %{context: Map.get(runtime, :context, %{}), state: current}
-
-    if key do
-      %{key: key, assigns: Map.merge(assigns, context_assigns)}
-    else
-      nil
-    end
-  end
-
-  defp subscriptions_for(spec, runtime) do
-    base = ["workflow_execution:#{Map.fetch!(runtime, :execution_id)}"]
-
-    declared =
-      Map.get(spec, :subscriptions) ||
-        Map.get(spec, "subscriptions") ||
-        []
-
-    declared
-    |> Enum.flat_map(fn
-      topic when is_binary(topic) -> [topic]
-      %{topic: topic} when is_binary(topic) -> [topic]
-      %{"topic" => topic} when is_binary(topic) -> [topic]
-      _ -> []
-    end)
-    |> Enum.map(&interpolate_topic(&1, Map.get(runtime, :context, %{}) || %{}))
-    |> Enum.reject(&is_nil/1)
-    |> then(&Enum.uniq(base ++ &1))
-  end
-
-  defp interpolate_topic(template, context) when is_binary(template) and is_map(context) do
-    placeholders = Regex.scan(~r/\{([a-zA-Z0-9_]+)\}/, template, capture: :all_but_first)
-
-    Enum.reduce_while(placeholders, template, fn [key], acc ->
-      value = Map.get(context, key) || Map.get(context, existing_atom(key))
-
-      if is_binary(value) and byte_size(value) > 0 do
-        {:cont, String.replace(acc, "{#{key}}", value)}
-      else
-        {:halt, nil}
-      end
-    end)
-  end
-
-  defp existing_atom(key) when is_binary(key) do
-    try do
-      :erlang.binary_to_existing_atom(key, :utf8)
-    rescue
-      ArgumentError -> nil
-    end
-  end
-
-  # Builds the projection extensions map. When `spec.projection_enricher`
-  # names a module exporting `enrich/2`, it is called with the base
-  # extensions and the runtime, and its return replaces the extensions map.
-  # When absent, extensions contain just the runtime meta (if any).
-  defp build_extensions(spec, runtime) do
-    base = %{meta: Map.get(runtime, :meta, %{})}
-
-    case Map.get(spec, :projection_enricher) do
-      nil ->
-        base
-
-      module when is_atom(module) ->
-        if function_exported?(module, :enrich, 2) do
-          try do
-            module.enrich(base, runtime)
-          rescue
-            e ->
-              Logger.warning(
-                "Projection enricher #{inspect(module)}.enrich/2 raised: #{inspect(e)}"
-              )
-
-              base
-          end
-        else
-          base
-        end
-
-      _ ->
-        base
-    end
-  end
-
-  end
+end
