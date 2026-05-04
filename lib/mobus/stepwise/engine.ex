@@ -39,6 +39,7 @@ defmodule Mobus.Stepwise.Engine do
           required(:tenant_id) => String.t(),
           required(:spec) => map(),
           required(:current_state) => atom() | String.t(),
+          required(:pipeline_mod) => module(),
           optional(:context) => map(),
           optional(:history) => list(),
           optional(:trace) => list(),
@@ -125,14 +126,17 @@ defmodule Mobus.Stepwise.Engine do
   end
 
   defp do_init(spec, runtime_context) do
+    pipeline_mod = resolve_pipeline_mod(runtime_context)
+
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
          {:ok, execution_id} <- fetch_execution_id(runtime_context),
-         :ok <- ensure_pipeline(runtime_context),
+         :ok <- ensure_pipeline(pipeline_mod, runtime_context),
          ir <- IR.normalize(spec),
          {:ok, initial_state} <- fetch_initial_state(ir) do
       runtime = %{
         execution_id: execution_id,
         tenant_id: tenant_id,
+        pipeline_mod: pipeline_mod,
         spec: ir,
         current_state: initial_state,
         context: Map.get(runtime_context, :initial_context, %{}) || %{},
@@ -210,7 +214,8 @@ defmodule Mobus.Stepwise.Engine do
   end
 
   defp do_handle_event(runtime, event, payload) do
-    :ok = ensure_pipeline(%{})
+    pipeline_mod = pipeline_mod_of(runtime)
+    :ok = ensure_pipeline(pipeline_mod, %{})
 
     input = %{
       spec: runtime.spec,
@@ -220,7 +225,7 @@ defmodule Mobus.Stepwise.Engine do
       status: :ok
     }
 
-    case call_pipeline(input) do
+    case call_pipeline(pipeline_mod, input) do
       {:ok, %{status: :error, error: reason, runtime: updated}} ->
         {:error, reason, compute_projection(updated)}
 
@@ -294,7 +299,7 @@ defmodule Mobus.Stepwise.Engine do
   @impl true
   def checkpoint(runtime) when is_map(runtime) do
     runtime
-    |> Map.drop([:projection])
+    |> Map.drop([:projection, :pipeline_mod])
     |> Map.take([
       :execution_id,
       :tenant_id,
@@ -365,8 +370,10 @@ defmodule Mobus.Stepwise.Engine do
   end
 
   defp do_restore(spec, checkpoint, runtime_context) do
+    pipeline_mod = resolve_pipeline_mod(runtime_context)
+
     with {:ok, tenant_id} <- fetch_tenant_id(runtime_context),
-         :ok <- ensure_pipeline(runtime_context) do
+         :ok <- ensure_pipeline(pipeline_mod, runtime_context) do
       ir = IR.normalize(spec)
 
       execution_id =
@@ -382,6 +389,7 @@ defmodule Mobus.Stepwise.Engine do
       runtime = %{
         execution_id: execution_id,
         tenant_id: tenant_id,
+        pipeline_mod: pipeline_mod,
         spec: ir,
         current_state:
           Map.get(checkpoint, :current_state) || Map.get(checkpoint, "current_state"),
@@ -400,21 +408,21 @@ defmodule Mobus.Stepwise.Engine do
     end
   end
 
-  defp ensure_pipeline(runtime_context) do
+  defp ensure_pipeline(pipeline_mod, runtime_context) do
     opts =
       case Map.get(runtime_context, :sync) do
         true -> [sync: true]
         _ -> []
       end
 
-    case StepwisePipeline.ensure_started(opts) do
+    case pipeline_mod.ensure_started(opts) do
       :ok -> :ok
       {:error, _} = err -> err
     end
   end
 
-  defp call_pipeline(input) do
-    case StepwisePipeline.call(input) do
+  defp call_pipeline(pipeline_mod, input) do
+    case pipeline_mod.call(input) do
       %ALF.IP{event: out} -> {:ok, out}
       %ALF.ErrorIP{error: error} -> {:error, error}
       %{} = out -> {:ok, out}
@@ -423,6 +431,8 @@ defmodule Mobus.Stepwise.Engine do
   end
 
   defp compute_projection(runtime) do
+    pipeline_mod = pipeline_mod_of(runtime)
+
     input = %{
       spec: runtime.spec,
       runtime: Map.delete(runtime, :projection),
@@ -432,7 +442,7 @@ defmodule Mobus.Stepwise.Engine do
       skip_transition: true
     }
 
-    case call_pipeline(input) do
+    case call_pipeline(pipeline_mod, input) do
       {:ok, %{runtime: updated}} ->
         if match?(%Projection{}, Map.get(updated, :projection)) do
           updated
@@ -447,6 +457,24 @@ defmodule Mobus.Stepwise.Engine do
         log_projection_error(error)
         build_projection(runtime, [error])
     end
+  end
+
+  # ── Pipeline-module indirection ────────────────────────────────────
+  # Reads the pipeline module from the runtime_context (set by callers
+  # that need per-agent or per-spec compiled pipelines). Falls back to
+  # the static Mobus.Stepwise.Pipeline.Stepwise for callers that don't
+  # inject one.
+
+  defp resolve_pipeline_mod(runtime_context) do
+    Map.get(runtime_context, :pipeline_mod) ||
+      Map.get(runtime_context, "pipeline_mod") ||
+      StepwisePipeline
+  end
+
+  defp pipeline_mod_of(runtime) do
+    Map.get(runtime, :pipeline_mod) ||
+      Map.get(runtime, "pipeline_mod") ||
+      StepwisePipeline
   end
 
   defp build_projection(runtime, errors \\ []) do
