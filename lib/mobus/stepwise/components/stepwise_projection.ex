@@ -142,7 +142,7 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
 
   defp existing_atom(key) when is_binary(key) do
     try do
-      String.to_existing_atom(key)
+      :erlang.binary_to_existing_atom(key, :utf8)
     rescue
       ArgumentError -> nil
     end
