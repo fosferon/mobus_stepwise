@@ -5,6 +5,8 @@ defmodule Mobus.Stepwise.Components.FsmBreakpoint do
   Records breakpoint hits for debugging and inspection purposes.
   """
 
+  alias Mobus.Stepwise.SpecHelpers
+
   @doc """
   Records breakpoint hits for debugging and inspection.
 
@@ -43,8 +45,8 @@ defmodule Mobus.Stepwise.Components.FsmBreakpoint do
         case on do
           :event -> value == event_name or to_string(value) == to_string(event_name)
           "event" -> to_string(value) == to_string(event_name)
-          :state_enter -> equivalent_state?(value, current)
-          "state_enter" -> equivalent_state?(value, current)
+          :state_enter -> SpecHelpers.equivalent_state?(value, current)
+          "state_enter" -> SpecHelpers.equivalent_state?(value, current)
           _ -> false
         end
       end)
@@ -66,10 +68,4 @@ defmodule Mobus.Stepwise.Components.FsmBreakpoint do
   end
 
   def call(event, _opts), do: event
-
-  defp equivalent_state?(a, b) when is_binary(a) and is_binary(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_atom(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_binary(b), do: Atom.to_string(a) == b
-  defp equivalent_state?(a, b) when is_binary(a) and is_atom(b), do: a == Atom.to_string(b)
-  defp equivalent_state?(_a, _b), do: false
 end

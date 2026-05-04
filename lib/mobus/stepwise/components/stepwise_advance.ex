@@ -2,7 +2,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   @moduledoc """
   Advances (or reverses) the current step for stepwise workflows.
 
-  Step ordering is derived from:
+  Step ordering is derived from `Mobus.Stepwise.SpecHelpers.ordered_steps/1`:
   - `spec.steps` (list of step IDs), otherwise
   - `states` with `step_number` (ascending)
 
@@ -10,6 +10,8 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   - `:next` / `"next"`
   - `:back` / `"back"`
   """
+
+  alias Mobus.Stepwise.SpecHelpers
 
   @doc """
   Advances or reverses the current step based on the event.
@@ -43,7 +45,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   def call(%{spec: spec, runtime: runtime, event: event_name, payload: payload} = event, _opts)
       when is_map(payload) do
     current = Map.get(runtime, :current_state)
-    ordered = ordered_steps(spec)
+    ordered = SpecHelpers.ordered_steps(spec)
 
     runtime =
       case normalize_event_key(event_name) do
@@ -66,14 +68,14 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
     event
     |> Map.put(:runtime, runtime)
     |> Map.put(:previous_state, current)
-    |> Map.put(:state_changed?, not equivalent_state?(current, Map.get(runtime, :current_state)))
+    |> Map.put(:state_changed?, not SpecHelpers.equivalent_state?(current, Map.get(runtime, :current_state)))
   end
 
   def call(event, _opts),
     do: Map.put(event, :status, :error) |> Map.put(:error, :invalid_stepwise_shape)
 
   defp maybe_move(runtime, ordered, current, dir, spec) when is_list(ordered) do
-    idx = Enum.find_index(ordered, &equivalent_state?(&1, current))
+    idx = Enum.find_index(ordered, &SpecHelpers.equivalent_state?(&1, current))
 
     next_state =
       cond do
@@ -103,32 +105,6 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
         {:deny, reason} ->
           Map.update(runtime, :blocked_reasons, %{}, &Map.put(&1, dir, reason))
       end
-    end
-  end
-
-  defp ordered_steps(spec) do
-    steps = Map.get(spec, :steps) || Map.get(spec, "steps")
-
-    cond do
-      is_list(steps) and steps != [] ->
-        steps
-
-      true ->
-        states = Map.get(spec, :states) || %{}
-
-        states
-        |> Enum.map(fn {k, v} ->
-          step_number =
-            Map.get(v, :step_number) ||
-              Map.get(v, "step_number") ||
-              Map.get(v, :step) ||
-              Map.get(v, "step") ||
-              0
-
-          {k, step_number}
-        end)
-        |> Enum.sort_by(fn {_k, n} -> n end)
-        |> Enum.map(fn {k, _} -> k end)
     end
   end
 
@@ -217,9 +193,4 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
     end
   end
 
-  defp equivalent_state?(a, b) when is_binary(a) and is_binary(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_atom(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_binary(b), do: Atom.to_string(a) == b
-  defp equivalent_state?(a, b) when is_binary(a) and is_atom(b), do: a == Atom.to_string(b)
-  defp equivalent_state?(_a, _b), do: false
-end
+  end

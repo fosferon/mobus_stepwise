@@ -25,6 +25,10 @@
   the event payload is merged transparently into `runtime.context` with no hardcoded field names.
   Each consumer's handler owns its domain vocabulary.
 
+- **`Mobus.Stepwise.SpecHelpers`**: Shared pure functions (`equivalent_state?/2`, `ordered_steps/1`)
+  extracted from `StepwiseAdvance`, `StepwiseProjection`, and `FsmBreakpoint`. Eliminates 7+ copies
+  of `equivalent_state?` and 4 copies of `ordered_steps` within the foundation alone.
+
 ### Changed
 
 - **Extracted Ecto schemas**: `WizardConfig` and `WizardStep` moved to a new sibling library
@@ -35,6 +39,20 @@
 
 - Engine `runtime` map now carries a `:pipeline_mod` field. `checkpoint/1` drops it (re-resolved on
   `restore/3`).
+
+- `EngineBehaviour` callback spec updated to include the third `init/2` return shape
+  (`{:error, {:initial_entry_action_failed, ...}}`). Downstream mock modules should
+  update their `@impl` clauses accordingly.
+
+### Fixed
+
+- **Init-error propagation** (BREAKING): Previously, errors from the initial state's entry
+  capability were silently discarded. Now `init/2` returns
+  `{:error, {:initial_entry_action_failed, reason, runtime}}` with `blocked_reasons`
+  populated. Consuming code that only matches `{:ok, runtime}` or `{:error, reason}`
+  will need a third clause for this tuple. This is a correct bug fix but **breaks
+  existing callers** — notably HuMan, which should run its test suite against this
+  release before upgrading.
 
 ## v0.1.0 (March 2026)
 

@@ -6,6 +6,7 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
   """
 
   alias Mobus.Stepwise.Projection
+  alias Mobus.Stepwise.SpecHelpers
 
   @doc """
   Builds the canonical `Mobus.Stepwise.Projection` from the current runtime.
@@ -33,7 +34,7 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
   @spec call(map(), map()) :: map()
   def call(%{spec: spec, runtime: runtime} = event, _opts) do
     current = Map.get(runtime, :current_state)
-    ordered = ordered_steps(spec)
+    ordered = SpecHelpers.ordered_steps(spec)
 
     projection = %Projection{
       execution_id: Map.fetch!(runtime, :execution_id),
@@ -55,7 +56,7 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
   end
 
   defp available_events(ordered, current) when is_list(ordered) do
-    idx = Enum.find_index(ordered, &equivalent_state?(&1, current))
+    idx = Enum.find_index(ordered, &SpecHelpers.equivalent_state?(&1, current))
 
     cond do
       is_nil(idx) ->
@@ -101,32 +102,6 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
       %{key: key, assigns: Map.merge(assigns, context_assigns)}
     else
       nil
-    end
-  end
-
-  defp ordered_steps(spec) do
-    steps = Map.get(spec, :steps) || Map.get(spec, "steps")
-
-    cond do
-      is_list(steps) and steps != [] ->
-        steps
-
-      true ->
-        states = Map.get(spec, :states) || %{}
-
-        states
-        |> Enum.map(fn {k, v} ->
-          step_number =
-            Map.get(v, :step_number) ||
-              Map.get(v, "step_number") ||
-              Map.get(v, :step) ||
-              Map.get(v, "step") ||
-              0
-
-          {k, step_number}
-        end)
-        |> Enum.sort_by(fn {_k, n} -> n end)
-        |> Enum.map(fn {k, _} -> k end)
     end
   end
 
@@ -199,9 +174,4 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
     end
   end
 
-  defp equivalent_state?(a, b) when is_binary(a) and is_binary(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_atom(b), do: a == b
-  defp equivalent_state?(a, b) when is_atom(a) and is_binary(b), do: Atom.to_string(a) == b
-  defp equivalent_state?(a, b) when is_binary(a) and is_atom(b), do: a == Atom.to_string(b)
-  defp equivalent_state?(_a, _b), do: false
-end
+  end
