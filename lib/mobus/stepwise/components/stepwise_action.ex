@@ -9,9 +9,21 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
         ...
       }
 
-  For now, actions are executed only on `:next` (and `"next"`) events.
-  When no capability runner adapter is configured (default), capability
-  execution is a no-op -- suitable for form-only wizards.
+  ## Action types
+
+  - `:capability` — executed via `Mobus.Stepwise.Capabilities` (delegates to
+    the configured `:capability_runner_adapter`).
+  - `:conversation` — delegated to a host-provided conversation handler
+    module configured via `:mobus_stepwise, :conversation_handler`. The
+    handler must implement `handle_conversation/5` with signature
+    `(event, runtime, trigger, payload, action_config) :: event`.
+
+  ## Conversation completion
+
+  When a conversation action's trigger is NOT `:enter` or `:chat_message`,
+  the event payload is merged transparently into `runtime.context`. The
+  conversation handler is responsible for constructing whatever payload
+  shape its consumer's workflows expect — no hardcoded field names.
   """
 
   alias Mobus.Stepwise.Artifacts
@@ -69,8 +81,64 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
         else
           event
         end
+
+      {:conversation, triggers, action_config} ->
+        if trigger_match?(event_key, triggers) do
+          run_conversation(event, runtime, event_name, payload, action_config)
+        else
+          event
+        end
     end
   end
+
+  # ── Conversation actions ────────────────────────────────────────
+
+  @conversation_handler_triggers [:enter, :__enter__, :chat_message]
+
+  defp run_conversation(event, runtime, event_name, payload, action_config) do
+    trigger = to_conversation_trigger(event_name)
+
+    cond do
+      conversation_handler() == nil ->
+        event
+
+      trigger in @conversation_handler_triggers ->
+        delegate_conversation(event, runtime, trigger, payload, action_config)
+
+      true ->
+        # Completion event — transparently merge payload into context.
+        merge_conversation_result(event, runtime, payload)
+    end
+  end
+
+  defp conversation_handler do
+    Application.get_env(:mobus_stepwise, :conversation_handler)
+  end
+
+  defp delegate_conversation(event, _runtime, trigger, payload, action_config) do
+    handler = conversation_handler()
+
+    if is_atom(handler) and Code.ensure_loaded?(handler) and
+         function_exported?(handler, :handle_conversation, 5) do
+      handler.handle_conversation(event, event.runtime, trigger, payload, action_config)
+    else
+      event
+    end
+  end
+
+  defp merge_conversation_result(event, runtime, payload) do
+    context = Map.get(runtime, :context, %{})
+    updated_context = Map.merge(context, payload)
+    updated_runtime = Map.put(runtime, :context, updated_context)
+    %{event | runtime: updated_runtime}
+  end
+
+  defp to_conversation_trigger(event) when event in [:enter, :__enter__, "__enter__"], do: :enter
+  defp to_conversation_trigger(event) when event in [:chat_message, "chat_message"], do: :chat_message
+  defp to_conversation_trigger(event) when is_atom(event), do: event
+  defp to_conversation_trigger(event) when is_binary(event), do: String.to_existing_atom(event)
+
+  # ── Capability execution ───────────────────────────────────────────
 
   defp run_capability(event, runtime, handle, event_name, payload, action_config) do
     tenant_id = Map.get(runtime, :tenant_id)
@@ -197,6 +265,17 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
   defp normalize_action(%{"type" => type, "handle" => handle} = action)
        when type in [:capability, "capability"] do
     {:capability, handle, normalize_triggers(action),
+     Map.get(action, "config") || Map.get(action, :config)}
+  end
+
+  defp normalize_action(%{type: type} = action)
+       when type in [:conversation, "conversation"] do
+    {:conversation, normalize_triggers(action), Map.get(action, :config)}
+  end
+
+  defp normalize_action(%{"type" => type} = action)
+       when type in [:conversation, "conversation"] do
+    {:conversation, normalize_triggers(action),
      Map.get(action, "config") || Map.get(action, :config)}
   end
 
