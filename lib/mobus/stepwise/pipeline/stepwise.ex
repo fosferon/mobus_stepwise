@@ -4,25 +4,16 @@ defmodule Mobus.Stepwise.Pipeline.Stepwise do
 
   This pipeline interprets the compiled spec (IR) in-band; we do not generate
   dynamic pipeline modules for disk-loaded workflows.
+
+  The stage order is defined in `Mobus.Stepwise.SpecHelpers.pipeline_stage_modules/0`
+  — both the foundation and workflow_stem pipelines reference the same list.
   """
 
   use ALF.DSL
 
-  alias Mobus.Stepwise.Components.FsmBreakpoint
-  alias Mobus.Stepwise.Components.StepwiseAction
-  alias Mobus.Stepwise.Components.StepwiseAdvance
-  alias Mobus.Stepwise.Components.StepwiseEntryAction
-  alias Mobus.Stepwise.Components.StepwiseContextMerge
-  alias Mobus.Stepwise.Components.StepwiseProjection
+  alias Mobus.Stepwise.SpecHelpers
 
-  @components [
-    stage(StepwiseContextMerge),
-    stage(StepwiseAction),
-    stage(StepwiseAdvance),
-    stage(StepwiseEntryAction),
-    stage(FsmBreakpoint),
-    stage(StepwiseProjection)
-  ]
+  @components for mod <- SpecHelpers.pipeline_stage_modules(), do: stage(mod)
 
   @doc """
   Ensures the ALF pipeline process is running, starting it if necessary.

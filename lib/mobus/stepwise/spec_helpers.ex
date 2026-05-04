@@ -12,6 +12,28 @@ defmodule Mobus.Stepwise.SpecHelpers do
   """
 
   @doc """
+  Returns the ordered list of component modules in the canonical stepwise
+  pipeline.
+
+  Both `Mobus.Stepwise.Pipeline.Stepwise` and `WorkflowStem.Pipelines.Stepwise`
+  derive their `@components` from this function, guaranteeing a single source
+  of truth for the pipeline stage order.
+
+  Order matters — changing this list changes the pipeline for ALL consumers.
+  """
+  @spec pipeline_stage_modules() :: [module()]
+  def pipeline_stage_modules do
+    [
+      Mobus.Stepwise.Components.StepwiseContextMerge,
+      Mobus.Stepwise.Components.StepwiseAction,
+      Mobus.Stepwise.Components.StepwiseAdvance,
+      Mobus.Stepwise.Components.StepwiseEntryAction,
+      Mobus.Stepwise.Components.FsmBreakpoint,
+      Mobus.Stepwise.Components.StepwiseProjection
+    ]
+  end
+
+  @doc """
   Returns `true` when two state identifiers refer to the same state.
 
   Compares atoms directly, binaries directly, and cross-compares

@@ -161,4 +161,83 @@ defmodule Mobus.Stepwise.EngineTest do
   defmodule BoomOnEnterAdapter do
     def execute(_tenant_id, _handle, _input), do: {:error, :boom}
   end
+
+  # Capability adapter that returns {:wait, ...} for wait-triggered actions.
+  # Used to verify that {:wait, ...} short-circuits the pipeline (state
+  # doesn't advance past the waiting step).
+  defmodule WaitOnEnterAdapter do
+    def execute(_tenant_id, _handle, _input) do
+      {:wait, %{type: :confirmation, message: "Please confirm"}}
+    end
+  end
+
+  describe "wait short-circuit" do
+    setup do
+      previous = Application.get_env(:mobus_stepwise, :capability_runner_adapter)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:mobus_stepwise, :capability_runner_adapter)
+          mod -> Application.put_env(:mobus_stepwise, :capability_runner_adapter, mod)
+        end
+      end)
+
+      :ok
+    end
+
+    test "init/2 returns {:wait, ...} when initial entry action yields wait" do
+      Application.put_env(
+        :mobus_stepwise,
+        :capability_runner_adapter,
+        WaitOnEnterAdapter
+      )
+
+      spec = %{
+        profile: :stepwise,
+        initial_state: :step_one,
+        steps: [:step_one, :step_two],
+        states: %{
+          step_one: %{
+            step_number: 1,
+            ui: %{key: :step_one},
+            action: %{type: :capability, handle: "test.wait", triggers: [:enter]}
+          },
+          step_two: %{step_number: 2, ui: %{key: :step_two}}
+        }
+      }
+
+      assert {:wait, runtime, cfg} = Engine.init(spec, @runtime_context)
+      assert runtime.current_state == :step_one
+      assert cfg.type == :confirmation
+    end
+
+    test "handle_event/3 returns {:wait, ...} and state does not advance" do
+      Application.put_env(
+        :mobus_stepwise,
+        :capability_runner_adapter,
+        WaitOnEnterAdapter
+      )
+
+      spec = %{
+        profile: :stepwise,
+        initial_state: :step_one,
+        steps: [:step_one, :step_two],
+        states: %{
+          step_one: %{
+            step_number: 1,
+            ui: %{key: :step_one},
+            action: %{type: :capability, handle: "test.wait", triggers: [:next]}
+          },
+          step_two: %{step_number: 2, ui: %{key: :step_two}}
+        }
+      }
+
+      {:ok, runtime} = Engine.init(spec, @runtime_context)
+
+      assert {:wait, runtime, cfg} = Engine.handle_event(runtime, :next, %{})
+      # State must NOT have advanced past the waiting step
+      assert runtime.current_state == :step_one
+      assert cfg.type == :confirmation
+    end
+  end
 end

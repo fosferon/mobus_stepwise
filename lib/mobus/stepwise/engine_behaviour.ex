@@ -11,6 +11,7 @@ defmodule Mobus.Stepwise.EngineBehaviour do
 
   @callback init(Types.spec(), Types.runtime_context()) ::
               {:ok, Types.runtime()}
+              | {:wait, Types.runtime(), Types.wait_cfg()}
               | {:error, Types.reason()}
               | {:error, {:initial_entry_action_failed, Types.reason(), Types.runtime()}}
 

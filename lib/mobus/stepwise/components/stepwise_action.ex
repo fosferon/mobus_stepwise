@@ -126,12 +126,15 @@ defmodule Mobus.Stepwise.Components.StepwiseAction do
     end
   end
 
-  defp merge_conversation_result(event, runtime, payload) do
+  defp merge_conversation_result(event, runtime, payload) when is_map(payload) do
     context = Map.get(runtime, :context, %{})
     updated_context = Map.merge(context, payload)
     updated_runtime = Map.put(runtime, :context, updated_context)
     %{event | runtime: updated_runtime}
   end
+
+  # Non-map payload on a completion event — pass through unchanged.
+  defp merge_conversation_result(event, _runtime, _payload), do: event
 
   defp to_conversation_trigger(event) when event in [:enter, :__enter__, "__enter__"], do: :enter
   defp to_conversation_trigger(event) when event in [:chat_message, "chat_message"], do: :chat_message

@@ -7,6 +7,7 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
 
   alias Mobus.Stepwise.Projection
   alias Mobus.Stepwise.SpecHelpers
+  require Logger
 
   @doc """
   Builds the canonical `Mobus.Stepwise.Projection` from the current runtime.
@@ -163,7 +164,12 @@ defmodule Mobus.Stepwise.Components.StepwiseProjection do
           try do
             module.enrich(base, runtime)
           rescue
-            _ -> base
+            e ->
+              Logger.warning(
+                "Projection enricher #{inspect(module)}.enrich/2 raised: #{inspect(e)}"
+              )
+
+              base
           end
         else
           base

@@ -89,6 +89,7 @@ defmodule Mobus.Stepwise.Engine do
   """
   @spec init(map(), map()) ::
           {:ok, runtime()}
+          | {:wait, runtime(), map()}
           | {:error, {:initial_entry_action_failed, term(), runtime()} | term()}
   @impl true
   def init(spec, runtime_context) when is_map(spec) and is_map(runtime_context) do
@@ -106,6 +107,13 @@ defmodule Mobus.Stepwise.Engine do
           {:ok, rt} ->
             Map.merge(telemetry_meta, %{
               status: :ok,
+              current_state: rt.current_state,
+              meta: Map.get(rt, :meta, %{})
+            })
+
+          {:wait, rt, _cfg} ->
+            Map.merge(telemetry_meta, %{
+              status: :wait,
               current_state: rt.current_state,
               meta: Map.get(rt, :meta, %{})
             })
@@ -151,6 +159,9 @@ defmodule Mobus.Stepwise.Engine do
       case run_initial_entry_action(runtime) do
         {:ok, runtime} ->
           {:ok, compute_projection(runtime)}
+
+        {:wait, runtime, wait_cfg} ->
+          {:wait, compute_projection(runtime), wait_cfg}
 
         {:error, reason, failed_runtime} ->
           {:error, {:initial_entry_action_failed, reason, compute_projection(failed_runtime)}}
@@ -547,6 +558,9 @@ defmodule Mobus.Stepwise.Engine do
     case StepwiseAction.run_entry_action(event) do
       %{status: :error, error: reason, runtime: updated_runtime} ->
         {:error, reason, merge_entry_runtime(runtime, updated_runtime)}
+
+      %{wait: wait_cfg, runtime: updated_runtime} ->
+        {:wait, merge_entry_runtime(runtime, updated_runtime), wait_cfg}
 
       %{runtime: updated_runtime} ->
         {:ok, merge_entry_runtime(runtime, updated_runtime)}
