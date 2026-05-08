@@ -8,3 +8,4 @@ erl_crash.dump
 *.beam
 /tmp/
 .elixir_ls/
+mobus_stepwise-*.tar

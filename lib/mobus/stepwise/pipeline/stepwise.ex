@@ -23,7 +23,7 @@ defmodule Mobus.Stepwise.Pipeline.Stepwise do
 
   ## Parameters
 
-    * `opts` — keyword list passed to `ALF.DSL.start/1`. Common options:
+    * `opts` — keyword list passed to the pipeline's `start/1` callback (injected by `use ALF.DSL`). Common options:
       * `:sync` — when `true`, pipeline runs synchronously (useful for tests)
 
   ## Returns

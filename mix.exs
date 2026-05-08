@@ -32,7 +32,8 @@ defmodule MobusStepwise.MixProject do
     [
       {:alf, "~> 0.12"},
       {:jason, "~> 1.4"},
-      {:telemetry, "~> 0.4 or ~> 1.0"}
+      {:telemetry, "~> 0.4 or ~> 1.0"},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
 
@@ -45,7 +46,7 @@ defmodule MobusStepwise.MixProject do
 
   defp docs do
     [
-      main: "Mobus.Stepwise",
+      main: "Mobus.Stepwise.Engine",
       source_url: @source_url
     ]
   end
