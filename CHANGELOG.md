@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.3.0 (May 2026)
+
+### Added
+
+- **New `:flow` profile**: `Mobus.Stepwise.Engine` now supports explicit graph execution alongside
+  the existing `:stepwise` compatibility profile. Consumers select the mode per execution through
+  `spec.profile`.
+
+- **Token-based graph runtime**: `:flow` executions track active/completed/failed/cancelled tokens,
+  branch-local state, join buffers, pending waits, aggregated branch results, and versioned
+  checkpoints suitable for restore of in-flight parallel work.
+
+- **Fork / join execution model**: `:flow` supports explicit fork nodes, parallel branch execution,
+  join nodes, deterministic branch result aggregation, and projection output under
+  `projection.extensions.flow`.
+
+- **Policy-aware graph semantics**: `:flow` now supports join policies (`:all`, `:any_success`,
+  `{:any_success, n}`, `{:quorum, n}`) and branch failure policies (`:fail_fast`, `:isolate`) so
+  consumers can model more realistic orchestration behavior without overloading the stepwise runtime.
+
+- **Deadline-aware waits and operational controls**: waiting flow tokens can carry deadlines,
+  `:timeout` can expire overdue waits without explicit token targeting, and `:cancel` / `:timeout`
+  can target individual tokens or whole branches through event payloads.
+
+- **Profile-aware telemetry**: engine telemetry metadata now includes `:profile`, and flow runtimes
+  enrich spans with token / node / branch context when available.
+
+### Changed
+
+- **Profile dispatch in `Mobus.Stepwise.Engine`**: the public engine API is unchanged, but execution
+  now routes internally to profile-specific runtime modules. Existing `:stepwise` behavior is
+  preserved behind `Mobus.Stepwise.Profiles.Stepwise`; `:flow` is implemented independently in
+  `Mobus.Stepwise.Profiles.Flow`.
+
+- **IR normalization expanded**: `Mobus.Stepwise.IR.normalize/1` now recognizes both `"stepwise"`
+  and `"flow"` profiles and normalizes graph-specific `nodes` / `edges` shapes.
+
+- **Projection contract expanded, not broken**: both profiles still return
+  `%Mobus.Stepwise.Projection{}`. `:flow` uses `current_state` as a focus node and places graph-wide
+  execution details into `projection.extensions.flow`.
+
+### Fixed
+
+- **Restore validation for graph checkpoints**: corrupted `:flow` checkpoints now fail fast on
+  restore when tokens reference missing nodes or waiting metadata no longer matches active waiting
+  tokens.
+
 ## v0.2.0 (May 2026)
 
 ### Added

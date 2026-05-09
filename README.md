@@ -2,7 +2,12 @@
 
 ALF-backed stepwise engine for multi-step wizards and workflows.
 
-MobusStepwise provides a lightweight, linear(ish) step execution engine built on top of the [ALF](https://github.com/antonmi/ALF) pipeline framework. It powers wizard flows, import pipelines, and any process that progresses through an ordered sequence of steps — collecting data, executing actions, and producing UI projections along the way.
+MobusStepwise provides ALF-backed workflow execution with two explicit profiles:
+
+- `:stepwise` for lightweight, linear(ish) wizards and imports
+- `:flow` for graph execution with explicit branching, fan-in, waits, and checkpointable parallel state
+
+Existing consumers stay on `:stepwise` unless they explicitly opt into `:flow`.
 
 ## Installation
 
@@ -32,6 +37,31 @@ spec = %{
     step_two:   %{step_number: 2, ui: %{key: :step_two}},
     step_three: %{step_number: 3, ui: %{key: :step_three}}
   }
+}
+```
+
+For graph workflows, use `profile: :flow` with explicit `nodes` and `edges`:
+
+```elixir
+spec = %{
+  profile: :flow,
+  initial_state: :start,
+  nodes: %{
+    start: %{type: :task, ui: %{key: :start}},
+    fork: %{type: :fork, ui: %{key: :fork}},
+    left: %{type: :task, ui: %{key: :left}},
+    right: %{type: :task, ui: %{key: :right}},
+    join: %{type: :join, ui: %{key: :join}},
+    done: %{type: :end, ui: %{key: :done}}
+  },
+  edges: [
+    %{from: :start, to: :fork},
+    %{from: :fork, to: :left, branch_id: :left},
+    %{from: :fork, to: :right, branch_id: :right},
+    %{from: :left, to: :join, branch_id: :left},
+    %{from: :right, to: :join, branch_id: :right},
+    %{from: :join, to: :done}
+  ]
 }
 ```
 
@@ -81,6 +111,8 @@ projection = Mobus.Stepwise.Engine.get_state(runtime)
 # }
 ```
 
+For `:flow`, the same `%Mobus.Stepwise.Projection{}` wrapper is returned with graph state under `projection.extensions.flow`, including `focus_node`, `active_nodes`, `active_tokens`, `branch_statuses`, `join_statuses`, and `pending_waits`.
+
 ### 5. Checkpoint and restore
 
 Save and restore engine state for resumable workflows:
@@ -92,6 +124,8 @@ checkpoint = Mobus.Stepwise.Engine.checkpoint(runtime)
 {:ok, restored} = Mobus.Stepwise.Engine.restore(spec, checkpoint, runtime_context)
 # Picks up exactly where it left off
 ```
+
+Profile choice is per execution. Mid-flight migration between `:stepwise` and `:flow` is intentionally not part of this release.
 
 ## Capability Actions
 

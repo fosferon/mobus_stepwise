@@ -12,9 +12,9 @@ defmodule Mobus.Stepwise.IR do
   Normalizes a raw workflow spec into the internal representation (IR).
 
   Applies the following normalizations:
-  - Coerces `"stepwise"` string profile to `:stepwise` atom
+  - Coerces `"stepwise"` / `"flow"` string profiles to atoms
   - Extracts `:initial_state` from atom or string keys
-  - Ensures `:states` and `:transitions` are maps (converts keyword lists)
+  - Ensures `:states`, `:transitions`, and `:nodes` are maps (converts keyword lists)
 
   This reduces downstream conditionals in engine and pipeline components.
 
@@ -39,6 +39,8 @@ defmodule Mobus.Stepwise.IR do
     |> normalize_initial_state()
     |> normalize_states()
     |> normalize_transitions()
+    |> normalize_nodes()
+    |> normalize_edges()
   end
 
   defp normalize_profile(spec) do
@@ -47,6 +49,7 @@ defmodule Mobus.Stepwise.IR do
     profile =
       case profile do
         "stepwise" -> :stepwise
+        "flow" -> :flow
         other -> other
       end
 
@@ -74,5 +77,23 @@ defmodule Mobus.Stepwise.IR do
       end
 
     Map.put(spec, :transitions, transitions)
+  end
+
+  defp normalize_nodes(spec) do
+    nodes = Map.get(spec, :nodes) || Map.get(spec, "nodes") || %{}
+
+    nodes =
+      case nodes do
+        %{} -> nodes
+        list when is_list(list) -> Map.new(list, fn {k, v} -> {k, v} end)
+        other -> other
+      end
+
+    Map.put(spec, :nodes, nodes)
+  end
+
+  defp normalize_edges(spec) do
+    edges = Map.get(spec, :edges) || Map.get(spec, "edges") || []
+    Map.put(spec, :edges, edges)
   end
 end

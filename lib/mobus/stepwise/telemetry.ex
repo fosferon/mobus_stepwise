@@ -62,11 +62,19 @@ defmodule Mobus.Stepwise.Telemetry do
 
   @doc false
   def runtime_metadata(runtime) when is_map(runtime) do
-    %{
+    base = %{
       execution_id: Map.get(runtime, :execution_id),
       tenant_id: Map.get(runtime, :tenant_id),
       current_state: Map.get(runtime, :current_state),
+      profile:
+        Map.get(runtime, :profile) ||
+          get_in(runtime, [:spec, :profile]),
       meta: Map.get(runtime, :meta, %{})
     }
+
+    case Map.get(runtime, :telemetry_scope) do
+      %{} = extra -> Map.merge(base, extra)
+      _ -> base
+    end
   end
 end

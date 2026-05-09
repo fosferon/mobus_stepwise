@@ -8,7 +8,7 @@ defmodule Mobus.Stepwise.Types do
 
   @type tenant_id :: String.t()
   @type execution_id :: String.t()
-  @type profile :: :stepwise
+  @type profile :: :stepwise | :flow
 
   @type spec :: map()
   @type ir :: map()

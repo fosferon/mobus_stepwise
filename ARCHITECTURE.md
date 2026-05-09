@@ -1,12 +1,15 @@
 # Architecture
 
-MobusStepwise is a step-by-step workflow execution engine. It drives multi-step wizards, import pipelines, and any linear(ish) process where a user or system advances through ordered steps, collecting data and executing actions along the way.
+MobusStepwise is an ALF-backed workflow execution engine with two explicit profiles:
+
+- `:stepwise` for ordered, wizard-like progression
+- `:flow` for graph execution with explicit forks, joins, waits, and checkpointable parallel state
 
 ## Core Model
 
 The engine separates **specification** (what the workflow looks like) from **runtime** (where the workflow is right now).
 
-### Spec (static definition)
+### `:stepwise` Spec (static definition)
 
 ```
 %{
@@ -36,7 +39,7 @@ Key fields:
 | `breakpoints`   | Optional debug breakpoints on events or state entries         |
 | `subscriptions` | PubSub topic templates interpolated with runtime context      |
 
-### Runtime (live state)
+### `:stepwise` Runtime (live state)
 
 ```
 %{
@@ -145,11 +148,22 @@ Returns the current `Projection` struct from the runtime. If the projection is s
 
 ## Profiles
 
-The engine uses a **profile** identifier (`:stepwise`) to select behavior. Currently, only the stepwise profile is implemented. The profile determines:
+The engine uses `spec.profile` to select profile-specific behavior.
 
-- Step ordering strategy (linear from `steps` list or `step_number` in states)
-- Available events (`:next`, `:back`)
-- Pipeline component configuration
+### `:stepwise`
+
+- Ordered step progression from `steps` or `step_number`
+- Single `current_state`
+- ALF pipeline-backed step/action/projection flow
+- Existing compatibility profile for all current consumers
+
+### `:flow`
+
+- Explicit `nodes` + `edges` graph model
+- Token-based execution with multiple active branches
+- Fork and join semantics with branch result aggregation
+- Shared `%Projection{}` wrapper with graph data in `projection.extensions.flow`
+- Versioned checkpoints that preserve active tokens, waits, join buffers, and branch results
 
 ## Events
 
@@ -164,6 +178,8 @@ Events drive state changes through the engine:
 
 Events carry a `payload` map that is merged into `runtime.context` by `StepwiseContextMerge`, accumulating user input across steps.
 
+For `:flow`, events are interpreted by the graph runtime. `:next` advances ready tokens, `:resume` resumes waiting tokens, and `:cancel` / `:timeout` can target specific tokens or branches through the payload.
+
 ## Projection
 
 The `Mobus.Stepwise.Projection` struct is the canonical contract between the engine and the UI layer. It contains everything the UI needs to render the current step:
@@ -174,6 +190,8 @@ The `Mobus.Stepwise.Projection` struct is the canonical contract between the eng
 - `artifacts` — durable workflow-scoped data
 - `blocked_reasons` — why certain events are blocked
 - `errors` / `trace` — debugging information
+
+For `:flow`, `current_state` is the focus node and graph-wide execution state lives under `projection.extensions.flow`.
 
 ## Capabilities
 
@@ -196,8 +214,8 @@ Artifacts are durable, workflow-scoped data that survive refreshes, retries, and
 
 Before the engine operates on a spec, it normalizes it via `Mobus.Stepwise.IR.normalize/1`. This:
 
-- Coerces string keys to atoms where needed
-- Ensures `states`, `transitions` exist as maps
+- Coerces known profile strings to atoms
+- Ensures `states`, `transitions`, and `nodes` exist in normalized shapes
 - Normalizes the profile identifier
 
 ## UI Schemas
