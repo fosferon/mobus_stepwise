@@ -50,6 +50,43 @@ defmodule Mobus.Stepwise.TransitionPolicyTest do
       {:ok, runtime} = Engine.handle_event(runtime, :next, %{})
       assert runtime.current_state == :step_three
     end
+
+    test "invalid redirect target is denied instead of committing impossible state" do
+      spec = %{
+        profile: :stepwise,
+        initial_state: :step_one,
+        steps: [:step_one, :step_two],
+        states: %{
+          step_one: %{step_number: 1, ui: %{key: :step_one}},
+          step_two: %{step_number: 2, ui: %{key: :step_two}}
+        },
+        transition_policy: __MODULE__.RedirectToMissing
+      }
+
+      {:ok, runtime} = Engine.init(spec, @runtime_context)
+      {:ok, runtime} = Engine.handle_event(runtime, :next, %{})
+
+      assert runtime.current_state == :step_one
+      assert runtime.blocked_reasons[:next] == {:invalid_redirect_target, :missing_step}
+    end
+
+    test "string-keyed transition_policy is honored" do
+      spec = %{
+        "profile" => "stepwise",
+        "initial_state" => :step_one,
+        "steps" => [:step_one, :step_two, :step_three],
+        "states" => %{
+          step_one: %{step_number: 1, ui: %{key: :step_one}},
+          step_two: %{step_number: 2, ui: %{key: :step_two}},
+          step_three: %{step_number: 3, ui: %{key: :step_three}}
+        },
+        "transition_policy" => __MODULE__.RedirectToThree
+      }
+
+      {:ok, runtime} = Engine.init(spec, @runtime_context)
+      {:ok, runtime} = Engine.handle_event(runtime, :next, %{})
+      assert runtime.current_state == :step_three
+    end
   end
 
   describe "no policy configured" do
@@ -101,6 +138,13 @@ defmodule Mobus.Stepwise.TransitionPolicyTest do
   defmodule RedirectToThree do
     def allow_transition?(_spec, _runtime, :step_one, :step_two, _event),
       do: {:redirect, :step_three}
+
+    def allow_transition?(_spec, _runtime, _from, _to, _event), do: :allow
+  end
+
+  defmodule RedirectToMissing do
+    def allow_transition?(_spec, _runtime, :step_one, :step_two, _event),
+      do: {:redirect, :missing_step}
 
     def allow_transition?(_spec, _runtime, _from, _to, _event), do: :allow
   end

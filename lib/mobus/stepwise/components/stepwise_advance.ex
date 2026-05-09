@@ -100,7 +100,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
           commit_move(runtime, current, next_state, dir)
 
         {:redirect, target} ->
-          commit_move(runtime, current, target, dir)
+          maybe_commit_redirect(runtime, spec, current, target, dir)
 
         {:deny, reason} ->
           Map.update(runtime, :blocked_reasons, %{}, &Map.put(&1, dir, reason))
@@ -123,11 +123,21 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
             commit_move(runtime, current, to_state, event_name)
 
           {:redirect, target} ->
-            commit_move(runtime, current, target, event_name)
+            maybe_commit_redirect(runtime, spec, current, target, event_name)
 
           {:deny, reason} ->
             Map.update(runtime, :blocked_reasons, %{}, &Map.put(&1, event_name, reason))
         end
+    end
+  end
+
+  defp maybe_commit_redirect(runtime, spec, from, target, event_name) do
+    if valid_state_target?(spec, target) do
+      commit_move(runtime, from, target, event_name)
+    else
+      Map.update(runtime, :blocked_reasons, %{}, fn reasons ->
+        Map.put(reasons, event_name, {:invalid_redirect_target, target})
+      end)
     end
   end
 
@@ -158,7 +168,7 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
   #   allow_transition?(spec, runtime, from_state, to_state, event) ::
   #     :allow | {:redirect, state} | {:deny, reason}
   defp apply_transition_policy(spec, runtime, from, to, event) do
-    case Map.get(spec, :transition_policy) do
+    case Map.get(spec, :transition_policy) || Map.get(spec, "transition_policy") do
       nil ->
         :allow
 
@@ -178,6 +188,15 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
     end
   end
 
+  defp valid_state_target?(spec, target) do
+    states = Map.get(spec, :states) || Map.get(spec, "states") || %{}
+    ordered = SpecHelpers.ordered_steps(spec)
+
+    Enum.any?(ordered, &SpecHelpers.equivalent_state?(&1, target)) or
+      Map.has_key?(states, target) or
+      Map.has_key?(states, to_string(target))
+  end
+
   defp resolve_transition_to(spec, event_name) do
     transitions = Map.get(spec, :transitions) || Map.get(spec, "transitions") || %{}
 
@@ -191,6 +210,6 @@ defmodule Mobus.Stepwise.Components.StepwiseAdvance do
       %{"to" => to} -> to
       _ -> nil
     end
-  end
+end
 
   end

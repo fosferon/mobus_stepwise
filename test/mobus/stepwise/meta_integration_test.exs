@@ -30,6 +30,18 @@ defmodule Mobus.Stepwise.MetaIntegrationTest do
       {:ok, runtime} = Engine.init(@spec_2_steps, %{tenant_id: "t", sync: true})
       assert runtime.meta == %{}
     end
+
+    test "string-keyed meta from runtime_context is preserved in runtime" do
+      {:ok, runtime} =
+        Engine.init(@spec_2_steps, %{
+          "tenant_id" => "test-tenant",
+          "execution_id" => "test-meta-strings",
+          "sync" => true,
+          "meta" => %{"session_id" => "sess-string"}
+        })
+
+      assert runtime.meta == %{"session_id" => "sess-string"}
+    end
   end
 
   describe "meta through handle_event" do
@@ -68,6 +80,22 @@ defmodule Mobus.Stepwise.MetaIntegrationTest do
 
       assert restored.meta.session_id == "new-session"
       assert restored.meta.node_id == "n-1"
+      assert restored.meta.dag_id == "dag-1"
+    end
+
+    test "restore accepts string-keyed runtime_context meta" do
+      {:ok, runtime} = Engine.init(@spec_2_steps, @runtime_context)
+      checkpoint = Engine.checkpoint(runtime)
+
+      {:ok, restored} =
+        Engine.restore(@spec_2_steps, checkpoint, %{
+          "tenant_id" => "test-tenant",
+          "sync" => true,
+          "meta" => %{"session_id" => "string-session", "node_id" => "n-2"}
+        })
+
+      assert restored.meta["session_id"] == "string-session"
+      assert restored.meta["node_id"] == "n-2"
       assert restored.meta.dag_id == "dag-1"
     end
   end

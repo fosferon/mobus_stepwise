@@ -48,7 +48,7 @@ defmodule Mobus.Stepwise.Profiles.Stepwise do
         trace: [],
         blocked_reasons: %{},
         breakpoint_hits: [],
-        meta: Map.get(runtime_context, :meta, %{}) || %{}
+        meta: runtime_context_meta(runtime_context)
       }
 
       case run_initial_entry_action(runtime) do
@@ -140,7 +140,7 @@ defmodule Mobus.Stepwise.Profiles.Stepwise do
           "stem-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
 
       checkpoint_meta = Map.get(checkpoint, :meta) || Map.get(checkpoint, "meta") || %{}
-      context_meta = Map.get(runtime_context, :meta) || %{}
+      context_meta = runtime_context_meta(runtime_context)
 
       runtime = %{
         execution_id: execution_id,
@@ -278,6 +278,10 @@ defmodule Mobus.Stepwise.Profiles.Stepwise do
       nil -> {:error, :missing_initial_state}
       state -> {:ok, state}
     end
+  end
+
+  defp runtime_context_meta(runtime_context) do
+    Map.get(runtime_context, :meta) || Map.get(runtime_context, "meta") || %{}
   end
 
   defp run_initial_entry_action(runtime) do
