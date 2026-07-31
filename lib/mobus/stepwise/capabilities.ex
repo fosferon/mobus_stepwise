@@ -4,8 +4,7 @@ defmodule Mobus.Stepwise.Capabilities do
 
   When adapter is nil (default), capability execution returns
   `{:ok, %{context: %{}}}` (no-op). This allows the package to work for
-  form-only wizards (e.g. Atrapos tenant creation) without requiring a
-  capability runner.
+  form-only wizards without requiring a capability runner.
 
   Configure via `:mobus_stepwise` application config:
 

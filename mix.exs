@@ -1,7 +1,7 @@
 defmodule MobusStepwise.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.3.1"
   @source_url "https://github.com/fosferon/mobus_stepwise"
 
   def project do
@@ -40,7 +40,9 @@ defmodule MobusStepwise.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url}
+      maintainers: ["Leonidas"],
+      links: %{"GitHub" => @source_url},
+      files: ~w(lib mix.exs README.md CHANGELOG.md ARCHITECTURE.md LICENSE)
     ]
   end
 

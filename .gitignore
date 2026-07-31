@@ -9,3 +9,11 @@ erl_crash.dump
 /tmp/
 .elixir_ls/
 mobus_stepwise-*.tar
+
+# Logs / agent tooling
+.logs/
+.pi/
+
+# Hex unpack artifacts
+contents.tar.gz
+*.tar.gz

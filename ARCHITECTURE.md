@@ -218,19 +218,15 @@ Before the engine operates on a spec, it normalizes it via `Mobus.Stepwise.IR.no
 - Ensures `states`, `transitions`, and `nodes` exist in normalized shapes
 - Normalizes the profile identifier
 
-## UI Schemas
+## Integration
 
-`WizardConfig` and `WizardStep` are Ecto embedded schemas for structuring wizard UI configuration in the consuming application. They provide validation via changesets and are used to define wizard metadata (title, step display mode) and individual step definitions (title, description, component).
+A typical host application integrates MobusStepwise by:
 
-## Integration: HuMan GrooveExecutor
-
-The primary consumer of MobusStepwise is `HuMan.GrooveExecutor`, which:
-
-1. Builds a stepwise spec from a groove definition (steps, states, UI keys)
-2. Calls `Engine.init/2` with the spec and a runtime context containing `tenant_id` and `execution_id`
-3. On user interaction, calls `Engine.handle_event/3` with `:next` and the form payload
-4. Reads `Engine.get_state/1` to get the `Projection` for LiveView rendering
-5. Uses `checkpoint/1` / `restore/3` for persistence across page refreshes
+1. Building a stepwise spec from its own domain model (steps, states, UI keys)
+2. Calling `Engine.init/2` with the spec and a runtime context containing `tenant_id` and `execution_id`
+3. On user interaction, calling `Engine.handle_event/3` with `:next` and the form payload
+4. Reading `Engine.get_state/1` to get the `Projection` for rendering
+5. Using `checkpoint/1` / `restore/3` for persistence across page refreshes
 
 The flow:
 

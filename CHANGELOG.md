@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1 (June 2026) — Public release hygiene
+
+### Changed
+
+- **Documentation cleanup.** Removed internal project references and stale
+  sections from the changelog, `ARCHITECTURE.md`, and module docs so the
+  package reads as a standalone library.
+- `package/0` now declares an explicit `files` list, and `ARCHITECTURE.md` is
+  included in the Hex package.
+
+### Internal (unreleased on Hex, now tagged)
+
+- Hardened stepwise transition and meta handling in the advance/profile path,
+  with expanded transition-policy and meta integration tests.
+
 ## v0.3.0 (May 2026)
 
 ### Added
@@ -78,11 +93,13 @@
 
 ### Changed
 
-- **Extracted Ecto schemas**: `WizardConfig` and `WizardStep` moved to a new sibling library
-  `mobus_stepwise_wizard_ui`. Module names unchanged (`Mobus.Stepwise.UI.WizardConfig`,
+- **Extracted Ecto schemas**: `WizardConfig` and `WizardStep` moved to a separate
+  companion library. Module names unchanged (`Mobus.Stepwise.UI.WizardConfig`,
   `Mobus.Stepwise.UI.WizardStep`). `mobus_stepwise` no longer depends on `:ecto`.
 
-  **Migration**: Consumers using the wizard schemas should add `{:mobus_stepwise_wizard_ui, github: "fosferon/mobus_stepwise_wizard_ui"}` to their `mix.exs`. No code changes needed.
+  The wizard UI schemas live in a separate companion library; `mobus_stepwise`
+  itself no longer depends on `:ecto`. No code changes are needed for consumers
+  that do not use the wizard schemas.
 
 - Engine `runtime` map now carries a `:pipeline_mod` field. `checkpoint/1` drops it (re-resolved on
   `restore/3`).
@@ -98,9 +115,9 @@
   `{:error, {:initial_entry_action_failed, reason, runtime}}` with `blocked_reasons`
   populated. Consuming code that only matches `{:ok, runtime}` or `{:error, reason}`
   will need a third clause for this tuple. This is a correct bug fix but **breaks
-  existing callers** — notably HuMan, which should run its test suite against this
-  release before upgrading.
+  existing callers**; run your test suite against this release before upgrading.
 
 ## v0.1.0 (March 2026)
 
-Initial extraction from MOBuS / Atrapos codebase.
+Initial public release: ALF-backed stepwise workflow engine with spec → IR
+normalization and a static stepwise pipeline.
