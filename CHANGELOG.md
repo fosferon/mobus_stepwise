@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.4.0-dev (unreleased) — graph mode for workflows stored as data
+
+Everything here is in the `:flow` profile. The `:stepwise` profile is
+untouched.
+
+### Added
+
+- **Conditional edges.** An edge may carry `when`: a data condition
+  (`Mobus.Stepwise.Condition`) evaluated against the run's context. Conditional
+  edges are tried in declared order; an edge without a condition is the
+  "otherwise". This gives decisions, and loops with an exit.
+- **`for_each` nodes.** One branch per item of a list found at run time, with
+  `max_concurrency`, `on_error: stop | continue`, and an optional `collect`
+  path. The body ends at a join, which hands on a summary
+  (`total / completed / failed / errors / items`). Items can wait.
+- **Timeout edges.** An edge with `on: timeout` is followed when a wait runs
+  out, instead of failing the branch.
+- **Resume context.** A `context` map in a resume payload lands in the
+  resumed branch's context.
+- **`context` in capability input**, the key the `:stepwise` profile uses, so
+  one capability serves both profiles.
+- **`:all_settled` join policy.**
+
+### Changed
+
+- **Specs loaded from data work.** Node types, join policies and failure
+  policies are accepted as strings, through fixed vocabularies; no atom is
+  created from spec or checkpoint data. An unknown node type is refused.
+- **Checkpoints survive JSON.** `checkpoint/1` carries no tuples, and
+  `restore/3` rebuilds tokens, waits, join buffers and loops from their
+  string-keyed form.
+- **History, trace and errors are bounded** (most recent 500), so a long loop
+  does not grow every checkpoint.
+- **A fork inside a branch joins back into that branch.** Previously its
+  successor lost the branch it came from. Join matching is nesting-aware.
+
+### Fixed
+
+- An untargeted event no longer walks ready branches it was not meant for
+  past their node with the action skipped.
+- A join that needs only some branches cancels the rest when it completes;
+  a late branch could complete it a second time.
+- A cycle made only of fork / join / end nodes is refused at init instead of
+  recursing.
+
 ## v0.3.1 (June 2026) — Public release hygiene
 
 ### Changed

@@ -5,12 +5,47 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
   alias Mobus.Stepwise.Artifacts
   alias Mobus.Stepwise.Capabilities
+  alias Mobus.Stepwise.Condition
   alias Mobus.Stepwise.IR
   alias Mobus.Stepwise.Projection
   alias Mobus.Stepwise.ProjectionHelpers
 
   @checkpoint_version 1
   @default_wait_event :resume
+
+  # Fixed vocabularies. A spec or a checkpoint that has been through JSON
+  # carries these as strings; they are mapped back through these tables, so
+  # no atom is ever created from stored data.
+  @node_types %{
+    "task" => :task,
+    "fork" => :fork,
+    "join" => :join,
+    "end" => :end,
+    "for_each" => :for_each
+  }
+  @token_statuses %{
+    "ready" => :ready,
+    "waiting" => :waiting,
+    "completed" => :completed,
+    "failed" => :failed,
+    "cancelled" => :cancelled
+  }
+  @failure_policies %{"fail_fast" => :fail_fast, "isolate" => :isolate}
+  @join_policies %{"all" => :all, "any_success" => :any_success, "all_settled" => :all_settled}
+
+  @token_keys ~w(token_id node_id branch_id status context artifacts wait parent_token_id
+                 region_id failure_policy join_target failure_reason for_each_join)a
+  @parent_keys ~w(token_id branch_id region_id failure_policy join_target for_each_join
+                  parent_token_id context)a
+  @for_each_keys ~w(node_id body items next_index total as max_concurrency failure_policy collect
+                    parent completed failed results errors)a
+
+  # Bounds that keep a long run's bookkeeping from growing with its length.
+  @max_for_each_items 100_000
+  @max_for_each_errors 50
+  @log_limit 500
+  @wait_keys ~w(reason deadline resume_event status)a
+  @join_entry_keys ~w(token_id branch_id status context artifacts arrived_at reason)a
 
   @impl true
   def init(spec, runtime_context) do
@@ -41,6 +76,8 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         join_buffers: %{},
         branch_results: %{},
         pending_waits: %{},
+        for_each: %{},
+        join_parents: %{},
         errors: [],
         telemetry_scope: %{node_id: initial_state}
       }
@@ -98,9 +135,35 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       :join_buffers,
       :branch_results,
       :pending_waits,
+      :for_each,
+      :join_parents,
       :errors
     ])
+    |> checkpoint_safe()
   end
+
+  # Everything the engine owns in a checkpoint must survive a JSON store. The
+  # only terms that do not are tuples (failure reasons such as
+  # `{:no_matching_edge, node}`); they become lists. The spec is left alone:
+  # `restore/3` is handed the spec and never reads it from the checkpoint.
+  defp checkpoint_safe(checkpoint) do
+    Map.new(checkpoint, fn
+      {:spec, spec} -> {:spec, spec}
+      {key, value} -> {key, json_safe(value)}
+    end)
+  end
+
+  defp json_safe(%DateTime{} = value), do: value
+  defp json_safe(%_{} = struct), do: struct |> Map.from_struct() |> json_safe()
+  defp json_safe(%{} = map), do: Map.new(map, fn {key, value} -> {key, json_safe(value)} end)
+  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
+  defp json_safe(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> json_safe()
+
+  defp json_safe(value)
+       when is_pid(value) or is_reference(value) or is_function(value) or is_port(value),
+       do: inspect(value)
+
+  defp json_safe(value), do: value
 
   @impl true
   def restore(spec, checkpoint, runtime_context) do
@@ -134,22 +197,16 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         blocked_reasons:
           Map.get(checkpoint, :blocked_reasons) || Map.get(checkpoint, "blocked_reasons") || %{},
         meta: Map.merge(checkpoint_meta, context_meta),
-        active_tokens:
-          Map.get(checkpoint, :active_tokens) || Map.get(checkpoint, "active_tokens") || %{},
-        completed_tokens:
-          Map.get(checkpoint, :completed_tokens) ||
-            Map.get(checkpoint, "completed_tokens") || %{},
-        failed_tokens:
-          Map.get(checkpoint, :failed_tokens) || Map.get(checkpoint, "failed_tokens") || %{},
-        cancelled_tokens:
-          Map.get(checkpoint, :cancelled_tokens) ||
-            Map.get(checkpoint, "cancelled_tokens") || %{},
-        join_buffers:
-          Map.get(checkpoint, :join_buffers) || Map.get(checkpoint, "join_buffers") || %{},
+        active_tokens: checkpoint |> checkpoint_field(:active_tokens) |> rehydrate_tokens(),
+        completed_tokens: checkpoint |> checkpoint_field(:completed_tokens) |> rehydrate_tokens(),
+        failed_tokens: checkpoint |> checkpoint_field(:failed_tokens) |> rehydrate_tokens(),
+        cancelled_tokens: checkpoint |> checkpoint_field(:cancelled_tokens) |> rehydrate_tokens(),
+        join_buffers: checkpoint |> checkpoint_field(:join_buffers) |> rehydrate_join_buffers(),
         branch_results:
-          Map.get(checkpoint, :branch_results) || Map.get(checkpoint, "branch_results") || %{},
-        pending_waits:
-          Map.get(checkpoint, :pending_waits) || Map.get(checkpoint, "pending_waits") || %{},
+          checkpoint |> checkpoint_field(:branch_results) |> rehydrate_branch_results(),
+        pending_waits: checkpoint |> checkpoint_field(:pending_waits) |> rehydrate_waits(),
+        for_each: checkpoint |> checkpoint_field(:for_each) |> rehydrate_for_each(),
+        join_parents: checkpoint |> checkpoint_field(:join_parents) |> rehydrate_parents(),
         errors: Map.get(checkpoint, :errors) || Map.get(checkpoint, "errors") || [],
         telemetry_scope: %{
           node_id:
@@ -165,6 +222,122 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     end
   end
 
+  defp checkpoint_field(checkpoint, key),
+    do: Map.get(checkpoint, key) || Map.get(checkpoint, Atom.to_string(key)) || %{}
+
+  # A checkpoint read back from a JSON store has string keys and string
+  # statuses. These put the engine-owned shapes back. They are no-ops on a
+  # checkpoint that never left memory.
+  defp rehydrate_tokens(tokens) when is_map(tokens) do
+    Map.new(tokens, fn {token_id, token} -> {token_id, rehydrate_token(token)} end)
+  end
+
+  defp rehydrate_tokens(_tokens), do: %{}
+
+  defp rehydrate_token(%{} = token) do
+    token = known_keys(token, @token_keys)
+
+    token
+    |> Map.update(:status, :ready, &vocab(&1, @token_statuses, :ready))
+    |> Map.update(:failure_policy, :fail_fast, &vocab(&1, @failure_policies, :fail_fast))
+    |> Map.update(:wait, nil, &rehydrate_wait/1)
+    |> Map.put_new(:context, %{})
+    |> Map.put_new(:artifacts, %{})
+  end
+
+  defp rehydrate_waits(waits) when is_map(waits) do
+    Map.new(waits, fn {token_id, wait} -> {token_id, rehydrate_wait(wait)} end)
+  end
+
+  defp rehydrate_waits(_waits), do: %{}
+
+  defp rehydrate_wait(%{} = wait) do
+    wait
+    |> known_keys(@wait_keys)
+    |> Map.update(:status, :waiting, &vocab(&1, @token_statuses, :waiting))
+    |> Map.update(:resume_event, @default_wait_event, fn
+      "resume" -> :resume
+      other -> other
+    end)
+  end
+
+  defp rehydrate_wait(wait), do: wait
+
+  defp rehydrate_join_buffers(buffers) when is_map(buffers) do
+    Map.new(buffers, fn {join_id, buffer} ->
+      buffer = known_keys(buffer, [:expected, :branches])
+
+      branches =
+        buffer
+        |> Map.get(:branches, %{})
+        |> Map.new(fn {branch_id, entry} ->
+          entry =
+            entry
+            |> known_keys(@join_entry_keys)
+            |> Map.update(:status, :completed, &vocab(&1, @token_statuses, :completed))
+
+          {branch_id, entry}
+        end)
+
+      {join_id, Map.put(buffer, :branches, branches)}
+    end)
+  end
+
+  defp rehydrate_join_buffers(_buffers), do: %{}
+
+  defp rehydrate_branch_results(results) when is_map(results) do
+    Map.new(results, fn {join_id, result} ->
+      {join_id, known_keys(result, [:branches, :artifacts])}
+    end)
+  end
+
+  defp rehydrate_branch_results(_results), do: %{}
+
+  defp rehydrate_for_each(states) when is_map(states) do
+    Map.new(states, fn {join_id, state} ->
+      state =
+        state
+        |> known_keys(@for_each_keys)
+        |> Map.update(:failure_policy, :fail_fast, &vocab(&1, @failure_policies, :fail_fast))
+        |> Map.update(:parent, %{}, &rehydrate_parent/1)
+
+      {join_id, state}
+    end)
+  end
+
+  defp rehydrate_for_each(_states), do: %{}
+
+  defp rehydrate_parents(parents) when is_map(parents) do
+    Map.new(parents, fn {join_id, parent} -> {join_id, rehydrate_parent(parent)} end)
+  end
+
+  defp rehydrate_parents(_parents), do: %{}
+
+  defp rehydrate_parent(%{} = parent) do
+    parent
+    |> known_keys(@parent_keys)
+    |> Map.update(:failure_policy, :fail_fast, &vocab(&1, @failure_policies, :fail_fast))
+  end
+
+  defp rehydrate_parent(_parent), do: %{}
+
+  defp known_keys(%{} = map, keys) do
+    Enum.reduce(keys, map, fn key, acc ->
+      string_key = Atom.to_string(key)
+
+      case Map.pop(acc, string_key, :__absent__) do
+        {:__absent__, acc} -> acc
+        {value, acc} -> Map.put_new(acc, key, value)
+      end
+    end)
+  end
+
+  defp known_keys(other, _keys), do: other
+
+  defp vocab(value, _table, _default) when is_atom(value) and not is_nil(value), do: value
+  defp vocab(value, table, default) when is_binary(value), do: Map.get(table, value, default)
+  defp vocab(_value, _table, default), do: default
+
   defp validate_flow_spec(%{profile: :flow} = spec) do
     nodes = Map.get(spec, :nodes, %{})
     initial = Map.get(spec, :initial_state)
@@ -175,11 +348,126 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       is_nil(initial) -> {:error, :missing_initial_state}
       is_nil(node_for(spec, initial)) -> {:error, {:unknown_initial_state, initial}}
       Enum.any?(edges, &invalid_edge?(spec, &1)) -> {:error, :invalid_edges}
-      true -> :ok
+      true -> validate_graph(spec, nodes, edges)
     end
   end
 
   defp validate_flow_spec(_), do: {:error, :invalid_flow_spec}
+
+  defp validate_graph(spec, nodes, edges) do
+    with :ok <- validate_node_types(nodes),
+         :ok <- validate_edge_conditions(edges),
+         :ok <- validate_for_each_nodes(spec, nodes) do
+      validate_no_structural_cycle(spec, nodes)
+    end
+  end
+
+  defp validate_for_each_nodes(spec, nodes) do
+    Enum.find_value(nodes, :ok, fn {node_id, node} ->
+      if node_type(node) == :for_each do
+        case for_each_body(spec, node_id) do
+          {:ok, _body, _join} -> validate_for_each_config(node_id, node)
+          {:error, reason} -> {:error, {:invalid_for_each, node_id, reason}}
+        end
+      end
+    end)
+  end
+
+  defp validate_for_each_config(node_id, node) do
+    over = field(node, :over)
+    concurrency = field(node, :max_concurrency)
+
+    cond do
+      not (is_binary(over) or is_list(over)) ->
+        {:error, {:invalid_for_each, node_id, :missing_over}}
+
+      not (is_nil(concurrency) or (is_integer(concurrency) and concurrency > 0)) ->
+        {:error, {:invalid_for_each, node_id, :invalid_max_concurrency}}
+
+      true ->
+        nil
+    end
+  end
+
+  # A for_each node has exactly one way into its body, and the body must end
+  # at a join: that join is where the items are counted back in.
+  defp for_each_body(spec, node_id) do
+    case Enum.filter(outgoing_edges(spec, node_id), &(&1.on == :next)) do
+      [edge] ->
+        case first_join_reachable(spec, edge.to) do
+          nil -> {:error, :no_join}
+          join_id -> {:ok, edge.to, join_id}
+        end
+
+      [] ->
+        {:error, :no_body}
+
+      _ ->
+        {:error, :more_than_one_body}
+    end
+  end
+
+  defp validate_node_types(nodes) do
+    Enum.find_value(nodes, :ok, fn {node_id, node} ->
+      case field(node, :type) do
+        type when is_binary(type) and not is_map_key(@node_types, type) ->
+          {:error, {:unknown_node_type, node_id, type}}
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  # Fork, join and end nodes are walked through without waiting for an event.
+  # A cycle made only of them would never yield, so it is refused up front.
+  defp validate_no_structural_cycle(spec, nodes) do
+    structural =
+      nodes
+      |> Enum.filter(fn {_id, node} -> node_type(node) in [:fork, :join, :end] end)
+      |> Enum.map(fn {id, _node} -> id end)
+
+    if Enum.any?(structural, &structural_cycle?(spec, &1, &1, MapSet.new())) do
+      {:error, :structural_cycle}
+    else
+      :ok
+    end
+  end
+
+  defp structural_cycle?(spec, origin, node_id, visited) do
+    spec
+    |> outgoing_edges(node_id)
+    |> Enum.any?(fn edge ->
+      target = edge.to
+
+      cond do
+        node_type(node_for(spec, target) || %{}) not in [:fork, :join, :end] -> false
+        edge_matches?(target, origin) -> true
+        MapSet.member?(visited, target) -> false
+        true -> structural_cycle?(spec, origin, target, MapSet.put(visited, target))
+      end
+    end)
+  end
+
+  defp validate_edge_conditions(edges) do
+    Enum.reduce_while(edges, :ok, fn edge, :ok ->
+      normalized = normalize_edge(edge)
+
+      case normalized.when do
+        nil ->
+          {:cont, :ok}
+
+        condition ->
+          case Condition.validate(condition) do
+            :ok ->
+              {:cont, :ok}
+
+            {:error, reason} ->
+              {:halt, {:error, {:invalid_edge_condition, normalized.from, normalized.to, reason}}}
+          end
+      end
+    end)
+  end
 
   defp validate_runtime_consistency(runtime) do
     tokens =
@@ -283,28 +571,40 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       token.status == :waiting and not resume_event?(event, token) ->
         {:ok, runtime, nil}
 
+      # A ready token moves only on an event meant for it. Without this an
+      # untargeted `:resume` for one waiting branch would walk every other
+      # ready branch past its node with the action skipped.
+      token.status == :ready and not advance_event?(event, node) ->
+        {:ok, runtime, nil}
+
       true ->
         do_process_token(runtime, token, node, event, payload)
     end
   end
 
   defp do_process_token(runtime, token, node, event, payload) do
+    resumed? = token.status == :waiting
+    resume_context = if resumed?, do: resume_context(payload), else: %{}
+
     token =
-      if token.status == :waiting do
+      if resumed? do
         token
         |> Map.put(:status, :ready)
         |> Map.put(:wait, nil)
+        |> Map.update(:context, resume_context, &Map.merge(&1 || %{}, resume_context))
       else
         token
       end
 
     runtime =
       runtime
+      |> maybe_merge_root_context(token, resume_context)
       |> put_active_token(token)
       |> Map.update(:pending_waits, %{}, &Map.delete(&1, token.token_id))
 
     case node_type(node) do
       :fork -> process_fork(runtime, token, node)
+      :for_each -> process_for_each(runtime, token, node)
       :join -> process_join(runtime, token, node)
       :end -> process_end(runtime, token)
       _ -> process_task(runtime, token, node, event, payload)
@@ -317,8 +617,10 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         {:ok, runtime, wait_cfg}
 
       {:ok, runtime, token, nil} ->
-        with {:ok, runtime, token} <- move_token_to_next(runtime, token, node, event) do
-          continue_token(runtime, token, payload)
+        case move_token_to_next(runtime, token, node, event) do
+          {:ok, runtime, token} -> continue_token(runtime, token, payload)
+          {:isolated, runtime} -> {:ok, runtime, nil}
+          {:error, reason, runtime} -> {:error, reason, runtime}
         end
 
       {:isolated, runtime} ->
@@ -334,6 +636,12 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     region_id = token.region_id || token.token_id
     parent_branch_context = branch_context_for(runtime, token)
     failure_policy = fork_failure_policy(node)
+
+    runtime =
+      case outgoing do
+        [edge | _] -> put_join_parent(runtime, first_join_reachable(runtime.spec, edge.to), token)
+        [] -> runtime
+      end
 
     runtime =
       runtime
@@ -377,7 +685,20 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     {:ok, with_focus(runtime, focus, %{token_id: token.token_id, node_id: token.node_id}), nil}
   end
 
-  defp process_join(runtime, token, _node) do
+  defp process_join(runtime, %{for_each_join: join_id} = token, _node) when not is_nil(join_id) do
+    if edge_matches?(join_id, token.node_id) do
+      runtime
+      |> remove_active_token(token.token_id)
+      |> for_each_arrival(join_id, token, :completed, nil)
+    else
+      # An inner join inside a for_each body: an ordinary fork/join.
+      process_plain_join(runtime, token)
+    end
+  end
+
+  defp process_join(runtime, token, _node), do: process_plain_join(runtime, token)
+
+  defp process_plain_join(runtime, token) do
     join_id = token.node_id
     branch_id = token.branch_id || :default
 
@@ -411,6 +732,279 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     maybe_complete_join(runtime, join_id)
   end
 
+  defp process_for_each(runtime, token, node) do
+    {:ok, body, join_id} = for_each_body(runtime.spec, token.node_id)
+    context = branch_context_for(runtime, token)
+
+    case for_each_items(field(node, :over), context) do
+      {:ok, items} when length(items) > @max_for_each_items ->
+        reason = {:for_each_too_many_items, token.node_id, length(items)}
+        for_each_failed(runtime, token, reason)
+
+      {:ok, items} ->
+        state = %{
+          node_id: token.node_id,
+          body: body,
+          items: items,
+          next_index: 0,
+          total: length(items),
+          as: field(node, :as) || context_key(runtime.spec, :item),
+          max_concurrency: field(node, :max_concurrency) || 1,
+          failure_policy: for_each_failure_policy(node),
+          collect: field(node, :collect),
+          parent: Map.take(token, @parent_keys),
+          completed: 0,
+          failed: 0,
+          results: [],
+          errors: []
+        }
+
+        runtime =
+          runtime
+          |> remove_active_token(token.token_id)
+          |> Map.update(:for_each, %{join_id => state}, &Map.put(&1, join_id, state))
+          |> append_history(%{
+            kind: :for_each,
+            node_id: token.node_id,
+            token_id: token.token_id,
+            items: state.total,
+            at: DateTime.utc_now()
+          })
+          |> append_trace(%{
+            kind: :for_each,
+            node_id: token.node_id,
+            token_id: token.token_id,
+            items: state.total
+          })
+
+        if state.total == 0 do
+          finalize_for_each(runtime, join_id)
+        else
+          runtime = spawn_for_each_items(runtime, join_id, state.max_concurrency)
+
+          {:ok, with_focus(runtime, body, %{token_id: token.token_id, node_id: token.node_id}),
+           nil}
+        end
+
+      {:error, reason} ->
+        for_each_failed(runtime, token, {reason, token.node_id})
+    end
+  end
+
+  defp for_each_failed(runtime, token, reason) do
+    failed = fail_token(runtime, token, reason)
+    if isolated_failure?(token), do: {:ok, failed, nil}, else: {:error, reason, failed}
+  end
+
+  defp for_each_items(items, _context) when is_list(items), do: {:ok, items}
+
+  defp for_each_items(path, context) when is_binary(path) do
+    case Condition.resolve_path(path, context) do
+      items when is_list(items) -> {:ok, items}
+      nil -> {:error, :for_each_list_missing}
+      _other -> {:error, :for_each_not_a_list}
+    end
+  end
+
+  defp for_each_items(_over, _context), do: {:error, :for_each_not_a_list}
+
+  # `on_error: "continue"` lets the other items carry on when one fails;
+  # the default stops the run at the first failure.
+  defp for_each_failure_policy(node) do
+    case field(node, :on_error) do
+      value when value in [:continue, "continue"] -> :isolate
+      _ -> :fail_fast
+    end
+  end
+
+  # Starts up to `count` of the items not yet started. Each item is its own
+  # branch: a token at the head of the body carrying the item.
+  defp spawn_for_each_items(runtime, join_id, count) do
+    state = Map.fetch!(runtime.for_each, join_id)
+    last = min(state.next_index + count, state.total) - 1
+
+    if last < state.next_index do
+      runtime
+    else
+      parent = state.parent
+      index_key = index_key(state.as)
+
+      runtime =
+        state.items
+        |> Enum.slice(state.next_index..last//1)
+        |> Enum.with_index(state.next_index)
+        |> Enum.reduce(runtime, fn {item, index}, acc ->
+          branch_id = Integer.to_string(index)
+
+          child =
+            child_token_id(parent.token_id, branch_id, state.body)
+            |> new_token(
+              state.body,
+              branch_id,
+              Map.merge(parent[:context] || %{}, %{state.as => item, index_key => index})
+            )
+            |> Map.put(:region_id, parent[:region_id] || parent.token_id)
+            |> Map.put(:parent_token_id, parent.token_id)
+            |> Map.put(:failure_policy, state.failure_policy)
+            |> Map.put(:join_target, join_id)
+            |> Map.put(:for_each_join, join_id)
+
+          put_active_token(acc, child)
+        end)
+
+      put_in(runtime, [:for_each, join_id, :next_index], last + 1)
+    end
+  end
+
+  defp index_key(as) when is_atom(as), do: :"#{as}_index"
+  defp index_key(as), do: "#{as}_index"
+
+  # One item is back: count it, keep what the spec asked to collect, start
+  # the next item waiting for a slot, and close the loop when all are in.
+  defp for_each_arrival(runtime, join_id, token, outcome, reason) do
+    state = Map.fetch!(runtime.for_each, join_id)
+    index = item_index(token)
+
+    state =
+      case outcome do
+        :completed ->
+          state
+          |> Map.update!(:completed, &(&1 + 1))
+          |> collect_item(index, token)
+
+        :failed ->
+          state
+          |> Map.update!(:failed, &(&1 + 1))
+          |> Map.update!(:errors, fn errors ->
+            if length(errors) < @max_for_each_errors,
+              do: errors ++ [%{index: index, reason: json_safe(reason)}],
+              else: errors
+          end)
+      end
+
+    runtime =
+      runtime
+      |> put_in([:for_each, join_id], state)
+      |> append_trace(%{kind: :for_each_item, join_id: join_id, index: index, status: outcome})
+
+    if state.completed + state.failed >= state.total do
+      finalize_for_each(runtime, join_id)
+    else
+      {:ok, spawn_for_each_items(runtime, join_id, 1), nil}
+    end
+  end
+
+  defp item_index(token) do
+    case token.branch_id do
+      index when is_integer(index) -> index
+      index when is_binary(index) -> String.to_integer(index)
+    end
+  end
+
+  defp collect_item(%{collect: nil} = state, _index, _token), do: state
+
+  defp collect_item(state, index, token) do
+    value = Condition.resolve_path(to_string(state.collect), token.context || %{})
+    Map.update!(state, :results, &[[index, value] | &1])
+  end
+
+  defp finalize_for_each(runtime, join_id) do
+    {state, remaining} = Map.pop(runtime.for_each, join_id)
+    spec = runtime.spec
+
+    summary =
+      %{
+        context_key(spec, :total) => state.total,
+        context_key(spec, :completed) => state.completed,
+        context_key(spec, :failed) => state.failed,
+        context_key(spec, :errors) => for_each_errors(spec, state.errors)
+      }
+      |> then(fn summary ->
+        if is_nil(state.collect) do
+          summary
+        else
+          items = state.results |> Enum.sort_by(&hd/1) |> Enum.map(&List.last/1)
+          Map.put(summary, context_key(spec, :items), items)
+        end
+      end)
+
+    results = %{context_key(spec, :flow_results) => %{join_id => summary}}
+    parent = state.parent
+
+    successor =
+      join_successor_token_id(join_id)
+      |> new_token(
+        join_id,
+        parent[:branch_id],
+        deep_merge(parent[:context] || %{}, successor_results(parent, results))
+      )
+      |> restore_parent_identity(parent)
+
+    runtime =
+      runtime
+      |> Map.put(:for_each, remaining)
+      |> Map.update(:branch_results, %{join_id => summary}, &Map.put(&1, join_id, summary))
+      |> maybe_merge_root_context(successor, results)
+      |> put_active_token(successor)
+      |> append_history(%{
+        kind: :for_each_complete,
+        node_id: join_id,
+        total: state.total,
+        failed: state.failed,
+        at: DateTime.utc_now()
+      })
+      |> append_trace(%{
+        kind: :for_each_complete,
+        node_id: join_id,
+        total: state.total,
+        failed: state.failed
+      })
+
+    leave_join(runtime, successor, join_id)
+  end
+
+  defp for_each_errors(spec, errors) do
+    Enum.map(errors, fn error ->
+      %{
+        context_key(spec, :index) => Map.get(error, :index) || Map.get(error, "index"),
+        context_key(spec, :reason) => Map.get(error, :reason) || Map.get(error, "reason")
+      }
+    end)
+  end
+
+  # A successor inside a branch keeps the results in its own context; one at
+  # the root reads them from the run's context, where they are merged.
+  defp successor_results(%{branch_id: branch_id}, results) when not is_nil(branch_id), do: results
+  defp successor_results(_parent, _results), do: %{}
+
+  defp restore_parent_identity(token, parent) do
+    token
+    |> Map.put(:region_id, parent[:region_id])
+    |> Map.put(:parent_token_id, parent[:parent_token_id])
+    |> Map.put(:failure_policy, parent[:failure_policy] || :fail_fast)
+    |> Map.put(:join_target, parent[:join_target])
+    |> Map.put(:for_each_join, parent[:for_each_join])
+  end
+
+  # Moves a join's successor on from the join. Conditions on the join's
+  # outgoing edges see the joined results.
+  defp leave_join(runtime, successor, join_id) do
+    node = node_for(runtime.spec, join_id)
+
+    case move_token_to_next(runtime, successor, node, :next) do
+      {:ok, runtime, token} -> continue_token(runtime, token, %{})
+      {:isolated, runtime} -> {:ok, runtime, nil}
+      {:error, reason, runtime} -> {:error, reason, runtime}
+    end
+  end
+
+  defp put_join_parent(runtime, nil, _token), do: runtime
+
+  defp put_join_parent(runtime, join_id, token) do
+    parent = Map.take(token, @parent_keys)
+    Map.update(runtime, :join_parents, %{join_id => parent}, &Map.put(&1, join_id, parent))
+  end
+
   defp process_end(runtime, token) do
     runtime =
       runtime
@@ -427,11 +1021,21 @@ defmodule Mobus.Stepwise.Profiles.Flow do
      nil}
   end
 
+  # What the outside world hands a waiting branch when it resumes it (the
+  # guest's form, the link that was clicked) arrives under `context` in the
+  # event payload and lands in that branch's context.
+  defp resume_context(payload) do
+    case Map.get(payload, :context) || Map.get(payload, "context") do
+      %{} = context -> context
+      _ -> %{}
+    end
+  end
+
   defp continue_token(runtime, token, payload) do
     node = node_for(runtime.spec, token.node_id)
 
     case node_type(node) do
-      type when type in [:fork, :join, :end] ->
+      type when type in [:fork, :for_each, :join, :end] ->
         do_process_token(runtime, token, node, :next, payload)
 
       _ ->
@@ -459,6 +1063,10 @@ defmodule Mobus.Stepwise.Profiles.Flow do
           branch_id: token.branch_id,
           branch_context: token.context || %{},
           graph_context: Map.get(runtime, :context, %{}),
+          # The same key the `:stepwise` profile hands a capability, so one
+          # capability serves both profiles: graph context with the branch's
+          # own context on top.
+          context: branch_context_for(runtime, token),
           join_context: join_context_for(runtime, token),
           current_state: Map.get(runtime, :current_state),
           execution_id: runtime.execution_id,
@@ -562,8 +1170,8 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   defp move_token_to_next(runtime, token, _node, event) do
     outgoing = outgoing_edges(runtime.spec, token.node_id)
 
-    case outgoing do
-      [] ->
+    case select_edge(runtime, token, outgoing) do
+      {:ok, nil} ->
         {:ok,
          runtime
          |> complete_token(token)
@@ -577,35 +1185,84 @@ defmodule Mobus.Stepwise.Profiles.Flow do
          |> append_trace(%{kind: :step, from: token.node_id, to: nil, token_id: token.token_id}),
          token}
 
-      [edge | _] ->
-        next = edge.to
-
-        updated_token =
-          token
-          |> Map.put(:node_id, next)
-          |> Map.put(:status, :ready)
-
-        runtime =
-          runtime
-          |> put_active_token(updated_token)
-          |> append_history(%{
-            event: event,
-            from: token.node_id,
-            to: next,
-            token_id: token.token_id,
-            branch_id: token.branch_id,
-            at: DateTime.utc_now()
-          })
-          |> append_trace(%{
-            kind: :step,
-            from: token.node_id,
-            to: next,
-            token_id: token.token_id,
-            branch_id: token.branch_id
-          })
-          |> with_focus(next, telemetry_scope(updated_token, next))
-
+      {:ok, edge} ->
+        {runtime, updated_token} = move_token_along(runtime, token, edge, event)
         {:ok, runtime, updated_token}
+
+      {:error, reason} ->
+        failed = fail_token(runtime, token, reason)
+
+        if isolated_failure?(token) do
+          {:isolated, failed}
+        else
+          {:error, reason, failed}
+        end
+    end
+  end
+
+  defp move_token_along(runtime, token, edge, event) do
+    next = edge.to
+
+    updated_token =
+      token
+      |> Map.put(:node_id, next)
+      |> Map.put(:status, :ready)
+
+    runtime =
+      runtime
+      |> put_active_token(updated_token)
+      |> append_history(%{
+        event: event,
+        from: token.node_id,
+        to: next,
+        token_id: token.token_id,
+        branch_id: token.branch_id,
+        at: DateTime.utc_now()
+      })
+      |> append_trace(%{
+        kind: :step,
+        from: token.node_id,
+        to: next,
+        token_id: token.token_id,
+        branch_id: token.branch_id
+      })
+      |> with_focus(next, telemetry_scope(updated_token, next))
+
+    {runtime, updated_token}
+  end
+
+  # Which edge a token leaves a node by. Edges carrying a `when` condition are
+  # tried in the order the spec declares them; the first that holds wins. An
+  # edge without a condition is the default ("otherwise"). A node whose edges
+  # are all conditional and none of which holds is a dead end the author did
+  # not draw, so it is an error rather than a silent stop.
+  defp select_edge(runtime, token, outgoing) do
+    normal = Enum.filter(outgoing, &(&1.on == :next))
+    conditional = normal |> Enum.reject(&is_nil(&1.when)) |> Enum.sort_by(& &1.index)
+    defaults = Enum.filter(normal, &is_nil(&1.when))
+
+    if conditional == [] do
+      {:ok, List.first(defaults)}
+    else
+      context = branch_context_for(runtime, token)
+
+      case Enum.find(conditional, &edge_condition_holds?(&1, context)) do
+        nil ->
+          case defaults do
+            [edge | _] -> {:ok, edge}
+            [] -> {:error, {:no_matching_edge, token.node_id}}
+          end
+
+        edge ->
+          {:ok, edge}
+      end
+    end
+  end
+
+  defp edge_condition_holds?(edge, context) do
+    case Condition.evaluate(edge.when, context) do
+      {:ok, result} -> result
+      {:error, _reason} -> false
     end
   end
 
@@ -743,20 +1400,44 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     Map.merge(Map.get(runtime, :context, %{}), token.context || %{})
   end
 
+  # Node ids keep the type the spec gave them. A token restored from a JSON
+  # checkpoint carries a string where a spec written in code used an atom, so
+  # the lookup accepts either without creating atoms.
   defp node_for(spec, node_id) do
     nodes = Map.get(spec, :nodes) || %{}
-    Map.get(nodes, node_id) || Map.get(nodes, to_string(node_id))
+
+    case Map.fetch(nodes, node_id) do
+      {:ok, node} ->
+        node
+
+      :error when is_atom(node_id) ->
+        Map.get(nodes, Atom.to_string(node_id))
+
+      :error when is_binary(node_id) ->
+        Enum.find_value(nodes, fn
+          {key, node} when is_atom(key) -> if Atom.to_string(key) == node_id, do: node
+          _ -> nil
+        end)
+
+      :error ->
+        nil
+    end
   end
 
   defp node_type(node) do
-    Map.get(node, :type) || Map.get(node, "type") || :task
+    case field(node, :type) do
+      nil -> :task
+      type when is_binary(type) -> Map.get(@node_types, type, :task)
+      type -> type
+    end
   end
 
   defp outgoing_edges(spec, from) do
     spec
     |> Map.get(:edges, [])
-    |> Enum.flat_map(fn edge ->
-      normalized = normalize_edge(edge)
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {edge, index} ->
+      normalized = edge |> normalize_edge() |> Map.put(:index, index)
 
       if edge_matches?(normalized.from, from) do
         [normalized]
@@ -798,15 +1479,32 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     end
   end
 
-  defp normalize_edge(%{from: from, to: to} = edge) do
-    %{from: from, to: to, branch_id: Map.get(edge, :branch_id) || Map.get(edge, "branch_id")}
+  defp normalize_edge({from, to}), do: %{from: from, to: to, branch_id: nil, when: nil, on: :next}
+  defp normalize_edge([from, to]), do: %{from: from, to: to, branch_id: nil, when: nil, on: :next}
+
+  defp normalize_edge(%{} = edge) do
+    %{
+      from: field(edge, :from),
+      to: field(edge, :to),
+      branch_id: field(edge, :branch_id),
+      when: field(edge, :when),
+      on: edge_on(field(edge, :on))
+    }
   end
 
-  defp normalize_edge(%{"from" => from, "to" => to} = edge) do
-    %{from: from, to: to, branch_id: Map.get(edge, "branch_id") || Map.get(edge, :branch_id)}
-  end
+  defp normalize_edge(_edge), do: %{from: nil, to: nil, branch_id: nil, when: nil, on: :next}
 
-  defp normalize_edge({from, to}), do: %{from: from, to: to, branch_id: nil}
+  defp edge_on(on) when on in [:timeout, "timeout"], do: :timeout
+  defp edge_on(_on), do: :next
+
+  # Reads a spec field whose key may be an atom (spec written in code) or a
+  # string (spec loaded from data). `false` is a value, not an absence.
+  defp field(map, key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
 
   defp edge_matches?(a, b) when is_atom(a) and is_binary(b), do: Atom.to_string(a) == b
   defp edge_matches?(a, b) when is_binary(a) and is_atom(b), do: a == Atom.to_string(b)
@@ -903,6 +1601,15 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   defp cancel_event?(event), do: event in [:cancel, "cancel"]
   defp timeout_event?(event), do: event in [:timeout, "timeout"]
 
+  defp advance_event?(event, _node) when event in [:next, "next"], do: true
+
+  defp advance_event?(event, node) do
+    case normalize_action(Map.get(node, :action) || Map.get(node, "action")) do
+      nil -> false
+      action -> trigger_match?(event, action.triggers)
+    end
+  end
+
   defp resume_event?(event, token) do
     wait = Map.get(token, :wait) || %{}
     event in [:resume, "resume", Map.get(wait, :resume_event), Map.get(wait, "resume_event")]
@@ -966,14 +1673,40 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
     Enum.reduce(token_ids, runtime, fn token_id, acc ->
       case Map.get(acc.active_tokens, token_id) do
-        nil ->
-          acc
-
-        token ->
-          acc
-          |> fail_token(token, :timeout)
+        nil -> acc
+        token -> timeout_token(acc, token)
       end
     end)
+  end
+
+  # A wait that runs out follows the node's `on: timeout` edge when it has
+  # one ("the guest never clicked → do this instead"). Without one the branch
+  # fails, as before.
+  defp timeout_token(runtime, token) do
+    case Enum.find(outgoing_edges(runtime.spec, token.node_id), &(&1.on == :timeout)) do
+      nil ->
+        fail_token(runtime, token, :timeout)
+
+      edge ->
+        token = token |> Map.put(:status, :ready) |> Map.put(:wait, nil)
+
+        runtime =
+          runtime
+          |> Map.update(:pending_waits, %{}, &Map.delete(&1, token.token_id))
+          |> append_trace(%{
+            kind: :wait_timeout,
+            token_id: token.token_id,
+            node_id: token.node_id,
+            branch_id: token.branch_id
+          })
+
+        {runtime, token} = move_token_along(runtime, token, edge, :timeout)
+
+        case continue_token(runtime, token, %{}) do
+          {:ok, updated, _wait} -> updated
+          {:error, _reason, updated} -> updated
+        end
+    end
   end
 
   defp fail_token(runtime, token, reason) do
@@ -983,8 +1716,7 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       runtime
       |> remove_active_token(token.token_id)
       |> Map.update(:pending_waits, %{}, &Map.delete(&1, token.token_id))
-      |> Map.update(:failed_tokens, %{}, &Map.put(&1, token.token_id, token))
-      |> Map.update(:blocked_reasons, %{}, &Map.put(&1, token.token_id, reason))
+      |> record_failed_token(token, reason)
       |> append_error(%{
         type: :flow_failure,
         reason: reason,
@@ -1000,31 +1732,54 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       })
       |> with_focus(token.node_id, telemetry_scope(token, token.node_id))
 
-    if isolated_failure?(token) and not is_nil(token.join_target) and not is_nil(token.branch_id) do
+    cond do
+      isolated_failure?(token) and not is_nil(Map.get(token, :for_each_join)) ->
+        runtime
+        |> for_each_arrival(token.for_each_join, token, :failed, reason)
+        |> case do
+          {:ok, updated, _wait} -> updated
+          {:error, _reason, updated} -> updated
+        end
+
+      isolated_failure?(token) and not is_nil(token.join_target) and not is_nil(token.branch_id) ->
+        runtime
+        |> put_in_join_buffer(token.join_target, token.branch_id, %{
+          token_id: token.token_id,
+          branch_id: token.branch_id,
+          status: :failed,
+          reason: reason,
+          context: token.context || %{},
+          artifacts: token.artifacts || %{},
+          arrived_at: DateTime.utc_now()
+        })
+        |> append_trace(%{
+          kind: :join_buffered_failure,
+          join_id: token.join_target,
+          token_id: token.token_id,
+          branch_id: token.branch_id,
+          reason: reason
+        })
+        |> maybe_complete_join(token.join_target)
+        |> case do
+          {:ok, updated, _wait} -> updated
+          {:error, _reason, updated} -> updated
+        end
+
+      true ->
+        runtime
+    end
+  end
+
+  # An item of a for_each that fails under `on_error: continue` is counted in
+  # the loop's summary; keeping every such token and a blocked reason for it
+  # would grow with the list.
+  defp record_failed_token(runtime, token, reason) do
+    if isolated_failure?(token) and not is_nil(Map.get(token, :for_each_join)) do
       runtime
-      |> put_in_join_buffer(token.join_target, token.branch_id, %{
-        token_id: token.token_id,
-        branch_id: token.branch_id,
-        status: :failed,
-        reason: reason,
-        context: token.context || %{},
-        artifacts: token.artifacts || %{},
-        arrived_at: DateTime.utc_now()
-      })
-      |> append_trace(%{
-        kind: :join_buffered_failure,
-        join_id: token.join_target,
-        token_id: token.token_id,
-        branch_id: token.branch_id,
-        reason: reason
-      })
-      |> maybe_complete_join(token.join_target)
-      |> case do
-        {:ok, updated, _wait} -> updated
-        {:error, _reason, updated} -> updated
-      end
     else
       runtime
+      |> Map.update(:failed_tokens, %{}, &Map.put(&1, token.token_id, token))
+      |> Map.update(:blocked_reasons, %{}, &Map.put(&1, token.token_id, reason))
     end
   end
 
@@ -1169,11 +1924,15 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   defp finalize_join(runtime, join_id, buffered) do
     {join_context, join_artifacts} = aggregate_join_results(buffered)
     branch_ids = Map.keys(buffered)
+    {parent, join_parents} = Map.pop(Map.get(runtime, :join_parents, %{}), join_id)
+    parent = parent || %{}
 
     runtime =
       runtime
+      |> Map.put(:join_parents, join_parents)
       |> record_join_result(join_id, join_context, join_artifacts)
       |> clear_join_buffer(join_id)
+      |> cancel_late_branches(join_id)
       |> append_history(%{
         kind: :join_complete,
         node_id: join_id,
@@ -1187,39 +1946,86 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         policy: join_policy(runtime.spec, join_id)
       })
 
-    next_edges = outgoing_edges(runtime.spec, join_id)
+    results = %{context_key(runtime.spec, :flow_results) => %{join_id => join_context}}
 
-    if next_edges == [] do
-      {:ok, with_focus(runtime, join_id, %{join_id: join_id, node_id: join_id}), nil}
+    if Enum.filter(outgoing_edges(runtime.spec, join_id), &(&1.on == :next)) == [] do
+      {:ok,
+       runtime
+       |> merge_graph_context(results)
+       |> merge_artifacts(join_artifacts)
+       |> with_focus(join_id, %{join_id: join_id, node_id: join_id}), nil}
     else
-      next_node = hd(next_edges).to
-      next_token = new_token(join_successor_token_id(join_id), next_node, nil, join_context)
+      # A fork taken at the root hands its successor the joined results, as it
+      # always has. A fork taken inside a branch hands the branch back its own
+      # context with the results beside it, so the branch stays a branch.
+      successor =
+        if is_nil(parent[:branch_id]) do
+          new_token(join_successor_token_id(join_id), join_id, nil, join_context)
+        else
+          join_successor_token_id(join_id)
+          |> new_token(join_id, parent[:branch_id], deep_merge(parent[:context] || %{}, results))
+          |> restore_parent_identity(parent)
+        end
 
       runtime =
         runtime
-        |> merge_graph_context(%{flow_results: %{join_id => join_context}})
+        |> maybe_merge_root_context(successor, results)
         |> merge_artifacts(join_artifacts)
-        |> put_active_token(next_token)
-        |> with_focus(next_node, %{
-          join_id: join_id,
-          node_id: next_node,
-          token_id: next_token.token_id
-        })
+        |> put_active_token(successor)
 
-      continue_token(runtime, next_token, %{})
+      leave_join(runtime, successor, join_id)
     end
   end
 
-  defp append_history(runtime, entry) do
-    Map.update(runtime, :history, [entry], &(&1 ++ [entry]))
+  # With an "any one is enough" or quorum join, branches still running when
+  # the join completes are cancelled. Left alone, one arriving later would
+  # fill the emptied buffer and complete the join a second time.
+  defp cancel_late_branches(runtime, join_id) do
+    runtime.active_tokens
+    |> Map.values()
+    |> Enum.filter(fn token ->
+      is_nil(Map.get(token, :for_each_join)) and not is_nil(token.join_target) and
+        edge_matches?(token.join_target, join_id) and not edge_matches?(token.node_id, join_id)
+    end)
+    |> Enum.reduce(runtime, fn token, acc ->
+      acc
+      |> remove_active_token(token.token_id)
+      |> Map.update(
+        :cancelled_tokens,
+        %{},
+        &Map.put(&1, token.token_id, Map.put(token, :status, :cancelled))
+      )
+      |> Map.update(:pending_waits, %{}, &Map.delete(&1, token.token_id))
+      |> append_trace(%{
+        kind: :cancelled,
+        token_id: token.token_id,
+        node_id: token.node_id,
+        branch_id: token.branch_id,
+        reason: :join_complete
+      })
+    end)
   end
 
-  defp append_trace(runtime, entry) do
-    Map.update(runtime, :trace, [entry], &(&1 ++ [entry]))
+  # Keys the engine writes into the run's context follow the spec's own style:
+  # a spec loaded from data (string ids) gets string keys, so the context
+  # reads the same before and after a JSON checkpoint.
+  defp context_key(spec, key) do
+    if is_binary(Map.get(spec, :initial_state)), do: Atom.to_string(key), else: key
   end
 
-  defp append_error(runtime, entry) do
-    Map.update(runtime, :errors, [entry], &(&1 ++ [entry]))
+  # History, trace and errors keep the most recent entries. A loop over
+  # thousands of items would otherwise grow each of them, and every
+  # checkpoint, with the length of the run.
+  defp append_history(runtime, entry), do: append_bounded(runtime, :history, entry)
+  defp append_trace(runtime, entry), do: append_bounded(runtime, :trace, entry)
+  defp append_error(runtime, entry), do: append_bounded(runtime, :errors, entry)
+
+  defp append_bounded(runtime, key, entry) do
+    Map.update(runtime, key, [entry], fn entries ->
+      entries = entries ++ [entry]
+      overflow = length(entries) - @log_limit
+      if overflow > 0, do: Enum.drop(entries, overflow), else: entries
+    end)
   end
 
   defp with_focus(runtime, node_id, telemetry_scope) do
@@ -1248,7 +2054,8 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       parent_token_id: nil,
       region_id: nil,
       failure_policy: :fail_fast,
-      join_target: nil
+      join_target: nil,
+      for_each_join: nil
     }
   end
 
@@ -1302,35 +2109,54 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   end
 
   defp fork_failure_policy(node) do
-    Map.get(node, :failure_policy) ||
-      Map.get(node, "failure_policy") ||
-      Map.get(node, :branch_failure_policy) ||
-      Map.get(node, "branch_failure_policy") ||
-      :fail_fast
+    (field(node, :failure_policy) || field(node, :branch_failure_policy))
+    |> vocab(@failure_policies, :fail_fast)
   end
 
   defp isolated_failure?(token), do: Map.get(token, :failure_policy, :fail_fast) == :isolate
 
+  # The join that closes the region a branch starting at `node_id` belongs
+  # to. A fork or for_each met on the way opens a region of its own: its
+  # join is stepped over, and the search carries on after it.
   defp first_join_reachable(spec, node_id, visited \\ MapSet.new()) do
+    type = node_type(node_for(spec, node_id) || %{})
+
     cond do
       MapSet.member?(visited, node_id) ->
         nil
 
-      node_type(node_for(spec, node_id) || %{}) == :join ->
+      type == :join ->
         node_id
 
-      true ->
+      type in [:fork, :for_each] ->
         visited = MapSet.put(visited, node_id)
 
-        spec
-        |> outgoing_edges(node_id)
-        |> Enum.find_value(fn edge -> first_join_reachable(spec, edge.to, visited) end)
+        with inner when not is_nil(inner) <- join_via_edges(spec, node_id, visited) do
+          join_via_edges(spec, inner, MapSet.put(visited, inner))
+        end
+
+      true ->
+        join_via_edges(spec, node_id, MapSet.put(visited, node_id))
     end
+  end
+
+  defp join_via_edges(spec, node_id, visited) do
+    spec
+    |> outgoing_edges(node_id)
+    |> Enum.find_value(fn edge -> first_join_reachable(spec, edge.to, visited) end)
   end
 
   defp join_policy(spec, join_id) do
     node = node_for(spec, join_id) || %{}
-    Map.get(node, :join_policy) || Map.get(node, "join_policy") || :all
+
+    case field(node, :join_policy) do
+      nil -> :all
+      policy when is_binary(policy) -> Map.get(@join_policies, policy, :all)
+      # The data forms of `{:any_success, n}` and `{:quorum, n}`.
+      %{"any_success" => count} when is_integer(count) -> {:any_success, count}
+      %{"quorum" => count} when is_integer(count) -> {:quorum, count}
+      policy -> policy
+    end
   end
 
   defp join_policy_satisfied?(spec, join_id, buffered) do
@@ -1346,6 +2172,9 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
       {:any_success, needed} ->
         completed_count >= needed
+
+      {:all_settled, expected_count} ->
+        map_size(buffered) == expected_count
     end
   end
 
@@ -1363,11 +2192,15 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
       {:any_success, needed} ->
         map_size(buffered) == expected_count and completed_count < needed
+
+      {:all_settled, _expected} ->
+        false
     end
   end
 
   defp normalize_join_policy(:all, expected_count), do: {:all, expected_count}
   defp normalize_join_policy({:all, count}, _expected_count), do: {:all, count}
+  defp normalize_join_policy(:all_settled, expected_count), do: {:all_settled, expected_count}
   defp normalize_join_policy(:any_success, _expected_count), do: {:any_success, 1}
   defp normalize_join_policy({:any_success, count}, _expected_count), do: {:any_success, count}
   defp normalize_join_policy({:quorum, count}, _expected_count), do: {:quorum, count}
