@@ -32,7 +32,8 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         blocked_reasons: %{},
         meta: Map.get(runtime_context, :meta, %{}) || %{},
         active_tokens: %{
-          root_token_id(initial_state) => new_token(root_token_id(initial_state), initial_state, nil, %{})
+          root_token_id(initial_state) =>
+            new_token(root_token_id(initial_state), initial_state, nil, %{})
         },
         completed_tokens: %{},
         failed_tokens: %{},
@@ -150,13 +151,12 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         pending_waits:
           Map.get(checkpoint, :pending_waits) || Map.get(checkpoint, "pending_waits") || %{},
         errors: Map.get(checkpoint, :errors) || Map.get(checkpoint, "errors") || [],
-        telemetry_scope:
-          %{
-            node_id:
-              Map.get(checkpoint, :current_state) ||
-                Map.get(checkpoint, "current_state") ||
-                Map.get(ir, :initial_state)
-          }
+        telemetry_scope: %{
+          node_id:
+            Map.get(checkpoint, :current_state) ||
+              Map.get(checkpoint, "current_state") ||
+              Map.get(ir, :initial_state)
+        }
       }
 
       with :ok <- validate_runtime_consistency(runtime) do
@@ -277,7 +277,8 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
     cond do
       is_nil(node) ->
-        {:error, {:unknown_node, token.node_id}, fail_token(runtime, token, {:unknown_node, token.node_id})}
+        {:error, {:unknown_node, token.node_id},
+         fail_token(runtime, token, {:unknown_node, token.node_id})}
 
       token.status == :waiting and not resume_event?(event, token) ->
         {:ok, runtime, nil}
@@ -337,8 +338,18 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     runtime =
       runtime
       |> remove_active_token(token.token_id)
-      |> append_history(%{kind: :fork, node_id: token.node_id, token_id: token.token_id, at: DateTime.utc_now()})
-      |> append_trace(%{kind: :fork, node_id: token.node_id, token_id: token.token_id, branch_count: length(outgoing)})
+      |> append_history(%{
+        kind: :fork,
+        node_id: token.node_id,
+        token_id: token.token_id,
+        at: DateTime.utc_now()
+      })
+      |> append_trace(%{
+        kind: :fork,
+        node_id: token.node_id,
+        token_id: token.token_id,
+        branch_count: length(outgoing)
+      })
 
     runtime =
       Enum.reduce(outgoing, runtime, fn edge, acc ->
@@ -383,8 +394,19 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       runtime
       |> remove_active_token(token.token_id)
       |> put_in_join_buffer(join_id, branch_id, entry)
-      |> append_history(%{kind: :join_wait, node_id: join_id, token_id: token.token_id, branch_id: branch_id, at: DateTime.utc_now()})
-      |> append_trace(%{kind: :join_buffered, node_id: join_id, token_id: token.token_id, branch_id: branch_id})
+      |> append_history(%{
+        kind: :join_wait,
+        node_id: join_id,
+        token_id: token.token_id,
+        branch_id: branch_id,
+        at: DateTime.utc_now()
+      })
+      |> append_trace(%{
+        kind: :join_buffered,
+        node_id: join_id,
+        token_id: token.token_id,
+        branch_id: branch_id
+      })
 
     maybe_complete_join(runtime, join_id)
   end
@@ -393,10 +415,16 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     runtime =
       runtime
       |> complete_token(token)
-      |> append_history(%{kind: :end, node_id: token.node_id, token_id: token.token_id, at: DateTime.utc_now()})
+      |> append_history(%{
+        kind: :end,
+        node_id: token.node_id,
+        token_id: token.token_id,
+        at: DateTime.utc_now()
+      })
       |> append_trace(%{kind: :end, node_id: token.node_id, token_id: token.token_id})
 
-    {:ok, with_focus(runtime, token.node_id, %{node_id: token.node_id, token_id: token.token_id}), nil}
+    {:ok, with_focus(runtime, token.node_id, %{node_id: token.node_id, token_id: token.token_id}),
+     nil}
   end
 
   defp continue_token(runtime, token, payload) do
@@ -477,11 +505,15 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
           {:wait, wait_return} ->
             {context_updates, wait_cfg} = extract_wait(wait_return)
+
             token =
               token
               |> Map.put(:status, :waiting)
               |> Map.put(:context, Map.merge(token.context || %{}, context_updates))
-              |> Map.put(:artifacts, Artifacts.merge(token.artifacts || %{}, artifacts_from(wait_return)))
+              |> Map.put(
+                :artifacts,
+                Artifacts.merge(token.artifacts || %{}, artifacts_from(wait_return))
+              )
               |> Map.put(:wait, normalize_wait(wait_cfg, event))
 
             runtime =
@@ -535,8 +567,15 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         {:ok,
          runtime
          |> complete_token(token)
-         |> append_history(%{event: event, from: token.node_id, to: nil, token_id: token.token_id, at: DateTime.utc_now()})
-         |> append_trace(%{kind: :step, from: token.node_id, to: nil, token_id: token.token_id}), token}
+         |> append_history(%{
+           event: event,
+           from: token.node_id,
+           to: nil,
+           token_id: token.token_id,
+           at: DateTime.utc_now()
+         })
+         |> append_trace(%{kind: :step, from: token.node_id, to: nil, token_id: token.token_id}),
+         token}
 
       [edge | _] ->
         next = edge.to
@@ -583,10 +622,11 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       available_events: available_events(runtime),
       blocked_reasons: Map.get(runtime, :blocked_reasons, %{}),
       breakpoint_hits: [],
-      subscriptions: ProjectionHelpers.subscriptions_for(runtime.spec, %{
-        runtime
-        | context: focus_context
-      }),
+      subscriptions:
+        ProjectionHelpers.subscriptions_for(runtime.spec, %{
+          runtime
+          | context: focus_context
+        }),
       artifacts: Map.get(runtime, :artifacts, %{}),
       ui: flow_ui_for(runtime.spec, focus_node, focus_context),
       errors: Map.get(runtime, :errors, []),
@@ -649,7 +689,10 @@ defmodule Mobus.Stepwise.Profiles.Flow do
     failed =
       runtime.failed_tokens
       |> Map.values()
-      |> Enum.group_by(&(&1.branch_id || :root), &Map.take(&1, [:token_id, :node_id, :status, :failure_reason]))
+      |> Enum.group_by(
+        &(&1.branch_id || :root),
+        &Map.take(&1, [:token_id, :node_id, :status, :failure_reason])
+      )
 
     %{active: active, completed: completed, failed: failed}
   end
@@ -663,7 +706,7 @@ defmodule Mobus.Stepwise.Profiles.Flow do
        %{
          join_policy: join_policy(runtime.spec, join_id),
          expected_branches: expected,
-          received_branches: Map.keys(buffered),
+         received_branches: Map.keys(buffered),
          complete?: join_policy_satisfied?(runtime.spec, join_id, buffered),
          completed_branches:
            buffered
@@ -876,9 +919,18 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         token ->
           acc
           |> remove_active_token(token_id)
-          |> Map.update(:cancelled_tokens, %{}, &Map.put(&1, token_id, Map.put(token, :status, :cancelled)))
+          |> Map.update(
+            :cancelled_tokens,
+            %{},
+            &Map.put(&1, token_id, Map.put(token, :status, :cancelled))
+          )
           |> Map.update(:pending_waits, %{}, &Map.delete(&1, token_id))
-          |> append_trace(%{kind: :cancelled, token_id: token_id, node_id: token.node_id, branch_id: token.branch_id})
+          |> append_trace(%{
+            kind: :cancelled,
+            token_id: token_id,
+            node_id: token.node_id,
+            branch_id: token.branch_id
+          })
           |> with_focus(Map.get(acc, :current_state), telemetry_scope(token, token.node_id))
       end
     end)
@@ -933,7 +985,12 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       |> Map.update(:pending_waits, %{}, &Map.delete(&1, token.token_id))
       |> Map.update(:failed_tokens, %{}, &Map.put(&1, token.token_id, token))
       |> Map.update(:blocked_reasons, %{}, &Map.put(&1, token.token_id, reason))
-      |> append_error(%{type: :flow_failure, reason: reason, node_id: token.node_id, token_id: token.token_id})
+      |> append_error(%{
+        type: :flow_failure,
+        reason: reason,
+        node_id: token.node_id,
+        token_id: token.token_id
+      })
       |> append_trace(%{
         kind: :failed,
         token_id: token.token_id,
@@ -980,7 +1037,12 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   end
 
   defp put_active_token(runtime, token) do
-    Map.update(runtime, :active_tokens, %{token.token_id => token}, &Map.put(&1, token.token_id, token))
+    Map.update(
+      runtime,
+      :active_tokens,
+      %{token.token_id => token},
+      &Map.put(&1, token.token_id, token)
+    )
   end
 
   defp remove_active_token(runtime, token_id) do
@@ -1048,11 +1110,21 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   defp put_in_join_buffer(runtime, join_id, branch_id, entry) do
     expected = expected_join_branches(runtime.spec, join_id)
 
-    Map.update(runtime, :join_buffers, %{join_id => %{expected: expected, branches: %{branch_id => entry}}}, fn existing ->
-      Map.update(existing, join_id, %{expected: expected, branches: %{branch_id => entry}}, fn join ->
-        Map.update(join, :branches, %{branch_id => entry}, &Map.put(&1, branch_id, entry))
-      end)
-    end)
+    Map.update(
+      runtime,
+      :join_buffers,
+      %{join_id => %{expected: expected, branches: %{branch_id => entry}}},
+      fn existing ->
+        Map.update(
+          existing,
+          join_id,
+          %{expected: expected, branches: %{branch_id => entry}},
+          fn join ->
+            Map.update(join, :branches, %{branch_id => entry}, &Map.put(&1, branch_id, entry))
+          end
+        )
+      end
+    )
   end
 
   defp clear_join_buffer(runtime, join_id) do
@@ -1070,9 +1142,21 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         runtime =
           runtime
           |> clear_join_buffer(join_id)
-          |> Map.update(:blocked_reasons, %{}, &Map.put(&1, join_id, {:join_policy_failed, join_policy(runtime.spec, join_id)}))
-          |> append_error(%{type: :join_policy_failed, join_id: join_id, policy: join_policy(runtime.spec, join_id)})
-          |> append_trace(%{kind: :join_failed, join_id: join_id, policy: join_policy(runtime.spec, join_id)})
+          |> Map.update(
+            :blocked_reasons,
+            %{},
+            &Map.put(&1, join_id, {:join_policy_failed, join_policy(runtime.spec, join_id)})
+          )
+          |> append_error(%{
+            type: :join_policy_failed,
+            join_id: join_id,
+            policy: join_policy(runtime.spec, join_id)
+          })
+          |> append_trace(%{
+            kind: :join_failed,
+            join_id: join_id,
+            policy: join_policy(runtime.spec, join_id)
+          })
           |> with_focus(join_id, %{join_id: join_id, node_id: join_id})
 
         {:error, {:join_policy_failed, join_id}, runtime}
@@ -1090,8 +1174,18 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       runtime
       |> record_join_result(join_id, join_context, join_artifacts)
       |> clear_join_buffer(join_id)
-      |> append_history(%{kind: :join_complete, node_id: join_id, branch_ids: branch_ids, at: DateTime.utc_now()})
-      |> append_trace(%{kind: :join_complete, node_id: join_id, branch_ids: branch_ids, policy: join_policy(runtime.spec, join_id)})
+      |> append_history(%{
+        kind: :join_complete,
+        node_id: join_id,
+        branch_ids: branch_ids,
+        at: DateTime.utc_now()
+      })
+      |> append_trace(%{
+        kind: :join_complete,
+        node_id: join_id,
+        branch_ids: branch_ids,
+        policy: join_policy(runtime.spec, join_id)
+      })
 
     next_edges = outgoing_edges(runtime.spec, join_id)
 
@@ -1106,7 +1200,11 @@ defmodule Mobus.Stepwise.Profiles.Flow do
         |> merge_graph_context(%{flow_results: %{join_id => join_context}})
         |> merge_artifacts(join_artifacts)
         |> put_active_token(next_token)
-        |> with_focus(next_node, %{join_id: join_id, node_id: next_node, token_id: next_token.token_id})
+        |> with_focus(next_node, %{
+          join_id: join_id,
+          node_id: next_node,
+          token_id: next_token.token_id
+        })
 
       continue_token(runtime, next_token, %{})
     end
@@ -1156,7 +1254,10 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
   defp root_token_id(initial_state), do: "tok:root:#{initial_state}"
   defp child_token_id(parent_id, branch_id, node_id), do: "#{parent_id}:#{branch_id}:#{node_id}"
-  defp join_successor_token_id(join_id), do: "tok:join:#{join_id}:#{System.unique_integer([:positive, :monotonic])}"
+
+  defp join_successor_token_id(join_id),
+    do: "tok:join:#{join_id}:#{System.unique_integer([:positive, :monotonic])}"
+
   defp edge_branch_id(edge, fallback), do: edge.branch_id || fallback
 
   defp fetch_tenant_id(runtime_context) do
