@@ -638,6 +638,70 @@ defmodule Mobus.Stepwise.FlowGraphTest do
     end
   end
 
+  describe "retry" do
+    test "puts a failed branch back at the step it failed on, and the run carries on" do
+      spec = %{
+        "profile" => "flow",
+        "initial_state" => "each",
+        "nodes" => %{
+          "each" => %{"type" => "for_each", "over" => "numbers", "collect" => "doubled"},
+          "work" => %{"action" => action("test.flaky")},
+          "collected" => %{"type" => "join"},
+          "done" => %{"type" => "end"}
+        },
+        "edges" => [["each", "work"], ["work", "collected"], ["collected", "done"]]
+      }
+
+      Process.put(:flaky_fails, true)
+      assert {:error, :not_now, runtime} = init!(spec, %{"numbers" => [1, 2, 3]}) |> run()
+      assert map_size(runtime.failed_tokens) == 1
+
+      # through storage, as a failed run would be
+      stored =
+        runtime |> Engine.checkpoint() |> Map.delete(:spec) |> Jason.encode!() |> Jason.decode!()
+
+      assert {:ok, runtime} = Engine.restore(spec, stored, @runtime_context)
+
+      Process.put(:flaky_fails, false)
+      assert {:ok, runtime} = Engine.handle_event(runtime, :retry, %{})
+      assert runtime.failed_tokens == %{}
+      assert runtime.blocked_reasons == %{}
+
+      runtime = run(runtime)
+      assert runtime.current_state == "done"
+      assert runtime.context["flow_results"]["collected"]["items"] == [2, 4, 6]
+    end
+
+    test "leaves alone a failure that a join already took into account" do
+      spec = %{
+        "profile" => "flow",
+        "initial_state" => "fork",
+        "nodes" => %{
+          "fork" => %{"type" => "fork", "failure_policy" => "isolate"},
+          "good" => %{"action" => action("test.mark", %{"as" => "good"})},
+          "bad" => %{"action" => action("test.fail")},
+          "join" => %{"type" => "join", "join_policy" => "any_success"},
+          "done" => %{"type" => "end"}
+        },
+        "edges" => [
+          %{"from" => "fork", "to" => "bad", "branch_id" => "a"},
+          %{"from" => "fork", "to" => "good", "branch_id" => "b"},
+          %{"from" => "bad", "to" => "join", "branch_id" => "a"},
+          %{"from" => "good", "to" => "join", "branch_id" => "b"},
+          ["join", "done"]
+        ]
+      }
+
+      runtime = init!(spec) |> run()
+      assert runtime.current_state == "done"
+      assert runtime.failed_tokens["tok:root:fork:a:bad"].absorbed == true
+
+      assert {:ok, runtime} = Engine.handle_event(runtime, :retry, %{})
+      assert runtime.active_tokens == %{}
+      assert Map.has_key?(runtime.failed_tokens, "tok:root:fork:a:bad")
+    end
+  end
+
   describe "a join that needs only some branches" do
     test "cancels the branches still running, so none can complete it twice" do
       spec = %{
@@ -697,6 +761,12 @@ defmodule Mobus.Stepwise.FlowGraphTest do
     end
 
     def execute(_tenant, "test.fail", _input), do: {:error, :boom}
+
+    def execute(_tenant, "test.flaky", %{context: %{"item" => item}}) do
+      if Process.get(:flaky_fails) and item == 2,
+        do: {:error, :not_now},
+        else: {:ok, %{context: %{"doubled" => item * 2}}}
+    end
 
     def execute(_tenant, "test.double", %{context: %{"item" => item}}) do
       {:ok, %{context: %{"doubled" => item * 2}}}

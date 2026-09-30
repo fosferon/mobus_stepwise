@@ -34,7 +34,7 @@ defmodule Mobus.Stepwise.Profiles.Flow do
   @join_policies %{"all" => :all, "any_success" => :any_success, "all_settled" => :all_settled}
 
   @token_keys ~w(token_id node_id branch_id status context artifacts wait parent_token_id
-                 region_id failure_policy join_target failure_reason for_each_join)a
+                 region_id failure_policy join_target failure_reason for_each_join absorbed)a
   @parent_keys ~w(token_id branch_id region_id failure_policy join_target for_each_join
                   parent_token_id context)a
   @for_each_keys ~w(node_id body items next_index total as max_concurrency failure_policy collect
@@ -99,6 +99,11 @@ defmodule Mobus.Stepwise.Profiles.Flow do
       timeout_event?(event) ->
         runtime
         |> timeout_tokens(payload)
+        |> ok_result()
+
+      retry_event?(event) ->
+        runtime
+        |> retry_tokens(payload)
         |> ok_result()
 
       true ->
@@ -1600,6 +1605,40 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
   defp cancel_event?(event), do: event in [:cancel, "cancel"]
   defp timeout_event?(event), do: event in [:timeout, "timeout"]
+  defp retry_event?(event), do: event in [:retry, "retry"]
+
+  # Puts failed branches back where they failed, ready to try their step
+  # again: what "carry on" means for a run that stopped on an error. A
+  # branch whose failure a join already took into account (`absorbed`) stays
+  # failed — the run moved on without it.
+  defp retry_tokens(runtime, payload) do
+    requested = Map.get(payload, :token_id) || Map.get(payload, "token_id")
+
+    runtime.failed_tokens
+    |> Map.values()
+    |> Enum.filter(fn token ->
+      Map.get(token, :absorbed) != true and (is_nil(requested) or token.token_id == requested)
+    end)
+    |> Enum.reduce(runtime, fn token, acc ->
+      revived =
+        token
+        |> Map.put(:status, :ready)
+        |> Map.put(:wait, nil)
+        |> Map.delete(:failure_reason)
+
+      acc
+      |> Map.update(:failed_tokens, %{}, &Map.delete(&1, token.token_id))
+      |> Map.update(:blocked_reasons, %{}, &Map.delete(&1, token.token_id))
+      |> put_active_token(revived)
+      |> append_trace(%{
+        kind: :retry,
+        token_id: token.token_id,
+        node_id: token.node_id,
+        branch_id: token.branch_id
+      })
+      |> with_focus(token.node_id, telemetry_scope(token, token.node_id))
+    end)
+  end
 
   defp advance_event?(event, _node) when event in [:next, "next"], do: true
 
@@ -1743,6 +1782,9 @@ defmodule Mobus.Stepwise.Profiles.Flow do
 
       isolated_failure?(token) and not is_nil(token.join_target) and not is_nil(token.branch_id) ->
         runtime
+        |> Map.update(:failed_tokens, %{}, fn failed ->
+          Map.update(failed, token.token_id, token, &Map.put(&1, :absorbed, true))
+        end)
         |> put_in_join_buffer(token.join_target, token.branch_id, %{
           token_id: token.token_id,
           branch_id: token.branch_id,

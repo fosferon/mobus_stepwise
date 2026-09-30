@@ -22,6 +22,9 @@ untouched.
 - **`context` in capability input**, the key the `:stepwise` profile uses, so
   one capability serves both profiles.
 - **`:all_settled` join policy.**
+- **`:retry` event.** Puts failed branches back at the step they failed on,
+  ready to try again. A failure a join already took into account stays
+  failed (`absorbed`).
 
 ### Changed
 
